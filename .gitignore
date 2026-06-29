@@ -1,0 +1,23 @@
+# Rust derleme çıktıları
+/target/
+engine/target/
+python/target/
+**/*.rs.bk
+
+# Python çıktıları ve sanal ortamlar
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.env
+
+# İşletim sistemi kalıntıları
+.DS_Store
+Thumbs.db
+
+# Henüz hazır olmayan modüller
+mcp/
+example.py
+Readme.md
+math.rs
+Cargo.lock
