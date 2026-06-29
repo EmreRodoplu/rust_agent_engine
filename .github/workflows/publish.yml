@@ -53,7 +53,7 @@ jobs:
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
-          args: --release --out dist --target universal2-apple-darwin
+          args: --release --out dist --target universal2-apple-darwin --manifest-path python/Cargo.toml
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
