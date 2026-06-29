@@ -1,5 +1,3 @@
-# rust_agent_engine/Cargo.toml
-
 [workspace]
 members = [
     "engine",
