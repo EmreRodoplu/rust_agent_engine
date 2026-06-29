@@ -24,7 +24,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: wheels-linux
-          path: python/dist # DÜZELTİLDİ
+          path: python/dist 
 
   windows:
     runs-on: windows-latest
@@ -43,7 +43,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: wheels-windows
-          path: python/dist # DÜZELTİLDİ
+          path: python/dist 
 
   macos:
     runs-on: macos-latest
@@ -61,7 +61,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: wheels-macos
-          path: python/dist # DÜZELTİLDİ
+          path: python/dist 
 
   sdist:
     runs-on: ubuntu-latest
@@ -73,12 +73,11 @@ jobs:
           command: sdist
           args: --out dist
           working-directory: python
-      # env: MATURIN_MANIFEST_PATH SİLİNDİ
       - name: Upload sdist
         uses: actions/upload-artifact@v4
         with:
           name: wheels-sdist
-          path: python/dist # DÜZELTİLDİ
+          path: python/dist 
 
   publish:
     runs-on: ubuntu-latest
@@ -88,7 +87,7 @@ jobs:
         with:
           pattern: wheels-*
           merge-multiple: true
-          path: dist # Burası kök dizin olarak kalmalı, publish işlemi kökten alıp yüklüyor.
+          path: dist 
       - name: Publish to PyPI
         uses: PyO3/maturin-action@v1
         with:
