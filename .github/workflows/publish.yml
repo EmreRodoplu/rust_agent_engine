@@ -91,7 +91,7 @@ jobs:
         with:
           pattern: wheels-*
           merge-multiple: true
-          path: python/dist
+          path: dist
       - name: Publish to PyPI
         uses: PyO3/maturin-action@v1
         with:
