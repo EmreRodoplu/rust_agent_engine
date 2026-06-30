@@ -18,13 +18,13 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: x86_64
-          args: --release --out dist
-          working-directory: python
+          # Manifest-path eklendi
+          args: --release --out dist --manifest-path python/Cargo.toml
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
           name: wheels-linux
-          path: python/dist 
+          path: dist
 
   windows:
     runs-on: windows-latest
@@ -37,13 +37,13 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: x64
-          args: --release --out dist 
-          working-directory: python
+          # Manifest-path eklendi
+          args: --release --out dist --manifest-path python/Cargo.toml
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
           name: wheels-windows
-          path: python/dist 
+          path: dist
 
   macos:
     runs-on: macos-latest
@@ -55,13 +55,13 @@ jobs:
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
-          args: --release --out dist --target universal2-apple-darwin 
-          working-directory: python
+          # Manifest-path eklendi, target args içine alındı
+          args: --release --out dist --target universal2-apple-darwin --manifest-path python/Cargo.toml
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
           name: wheels-macos
-          path: python/dist 
+          path: dist
 
   sdist:
     runs-on: ubuntu-latest
@@ -71,13 +71,13 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           command: sdist
-          args: --out dist
-          working-directory: python
+          # Manifest-path eklendi
+          args: --out dist --manifest-path python/Cargo.toml
       - name: Upload sdist
         uses: actions/upload-artifact@v4
         with:
           name: wheels-sdist
-          path: python/dist 
+          path: dist
 
   publish:
     runs-on: ubuntu-latest
@@ -87,7 +87,7 @@ jobs:
         with:
           pattern: wheels-*
           merge-multiple: true
-          path: dist 
+          path: dist
       - name: Publish to PyPI
         uses: PyO3/maturin-action@v1
         with:
