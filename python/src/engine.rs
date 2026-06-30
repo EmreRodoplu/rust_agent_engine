@@ -6,13 +6,16 @@ use rust_agent_engine_core::agent::Agent;
 use pyo3::types::PyDict;
 use rust_agent_engine_core::error::AgentError;
 use serde_json::json;
+use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 
 use crate::tools::PythonTool;
 
+#[gen_stub_pyclass]
 #[pyclass(name = "LLMConfig")]
 #[derive(Clone)]
 pub struct PyLLMConfig { pub inner: LLMConfig }
 
+#[gen_stub_pymethods]
 #[pymethods]
 impl PyLLMConfig {
     #[new]
@@ -22,12 +25,14 @@ impl PyLLMConfig {
     }
 }
 
+#[gen_stub_pyclass]
 #[pyclass(name = "Agent")]
 pub struct PyAgent {
     inner: Agent,
     rt: Runtime, 
 }
 
+#[gen_stub_pymethods]
 #[pymethods]
 impl PyAgent {
     #[new]

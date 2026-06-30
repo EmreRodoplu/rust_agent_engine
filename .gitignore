@@ -18,6 +18,5 @@ Thumbs.db
 # Henüz hazır olmayan modüller
 mcp/
 example.py
-Readme.md
 math.rs
 Cargo.lock
