@@ -7,7 +7,7 @@ resolver = "2"
 
 
 [workspace.package]
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 authors = ["Emre Rodoplu <emrerodoplu3@gmail.com>"]
 description = "High-performance autonomous multi-agent engine powered by Rust and Python."
