@@ -14,32 +14,35 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
 
-      - uses: actions/setup-python@v5
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.10"
 
       - name: Install maturin
         run: pip install maturin
 
-      - name: Build wheels (Linux / Windows)
-        if: matrix.os != 'macos-latest'
+      - name: Build wheels (Linux/macOS)
+        if: matrix.os != 'windows-latest'
         run: |
           maturin build \
             --manifest-path python/Cargo.toml \
             --release \
             --out dist
 
-      - name: Build wheels (macOS universal2)
-        if: matrix.os == 'macos-latest'
+      - name: Build wheels (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: bash
         run: |
           maturin build \
             --manifest-path python/Cargo.toml \
             --release \
-            --target universal2-apple-darwin \
             --out dist
 
       - name: Upload wheels
@@ -52,18 +55,21 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
 
-      - uses: actions/setup-python@v5
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.10"
 
       - name: Install maturin
         run: pip install maturin
 
-      - name: Build source distribution
+      - name: Build sdist
         run: |
           cd python
           maturin sdist --out ../dist
@@ -79,18 +85,21 @@ jobs:
     needs: [build, sdist]
 
     steps:
-      - uses: actions/download-artifact@v4
+      - name: Download wheels
+        uses: actions/download-artifact@v4
         with:
           pattern: wheels-*
           merge-multiple: true
           path: dist
 
-      - uses: actions/download-artifact@v4
+      - name: Download sdist
+        uses: actions/download-artifact@v4
         with:
           name: sdist
           path: dist
 
-      - uses: actions/setup-python@v5
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.10"
 
