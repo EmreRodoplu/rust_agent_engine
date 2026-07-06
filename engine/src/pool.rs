@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 use serde_json::{json, Value};
 
-use crate::tools::Tool; 
+use crate::tools::Tool;
 use crate::error::{AgentError, Result};
+
 pub struct ToolPool {
     tools: HashMap<String, Box<dyn Tool>>,
     cached_schemas: Vec<Value>,
@@ -15,18 +16,23 @@ impl ToolPool {
             cached_schemas: Vec::new(),
         }
     }
+
     pub fn register_tool(&mut self, tool: Box<dyn Tool>) {
+        let tool_name = tool.name(); 
         let full_schema = json!({
             "type": "function",
             "function": {
-                "name": tool.name(),
+                "name": tool_name,
                 "description": tool.description(),
-                "parameters": tool.schema() 
+                "parameters": tool.schema()
             }
         });
-        
+
+        self.cached_schemas.retain(|s| {
+            s["function"]["name"].as_str() != Some(tool_name.as_str())
+        });
         self.cached_schemas.push(full_schema);
-        self.tools.insert(tool.name().to_string(), tool);
+        self.tools.insert(tool_name, tool);
     }
 
     pub fn get_tool_schemas(&self) -> Vec<Value> {
@@ -34,11 +40,11 @@ impl ToolPool {
     }
 
     pub async fn execute_tool(&self, name: &str, args: Value) -> Result<String> {
-        
-        let tool = self.tools.get(name).ok_or_else(|| {
-            AgentError::InternalError(format!("Kayıtlı olmayan bir araç çağrıldı: {}", name))
-        })?;
-        
+        let tool = self
+            .tools
+            .get(name)
+            .ok_or_else(|| AgentError::ToolNotFound(name.to_string()))?;
+
         tool.execute(args).await
     }
 }

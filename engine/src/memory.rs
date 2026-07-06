@@ -59,9 +59,11 @@ impl ConversationHistory {
     }
 
     pub fn prune(&mut self, max_messages: usize) {
-        if self.messages.len() > max_messages {
+        let safe_max = max_messages.max(1);
+
+        if self.messages.len() > safe_max {
             let system_prompt = self.messages.remove(0);
-            let drain_count = self.messages.len() - (max_messages - 1);
+            let drain_count = self.messages.len().saturating_sub(safe_max - 1);
             self.messages.drain(0..drain_count);
             self.messages.insert(0, system_prompt);
         }

@@ -1,14 +1,13 @@
 use async_trait::async_trait;
 use serde_json::Value;
 
-use crate::error::Result; 
+use crate::error::Result;
 
 #[async_trait]
 pub trait Tool: Send + Sync {
-    
-    fn name(&self) -> &'static str;
+    fn name(&self) -> String;
 
-    fn description(&self) -> &'static str;
+    fn description(&self) -> String;
 
     fn schema(&self) -> Value;
 
