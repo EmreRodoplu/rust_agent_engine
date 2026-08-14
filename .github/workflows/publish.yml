@@ -37,7 +37,6 @@ jobs:
             --manifest-path python/Cargo.toml \
             --release \
             --out dist \
-            --manylinux auto \
             -i python${{ matrix.python-version }}
 
       - name: Build wheels (Windows)
