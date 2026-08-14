@@ -1,18 +1,19 @@
+use futures::StreamExt;
 use reqwest::Client;
 use serde_json::{json, Value};
-use futures::StreamExt;
 use std::collections::BTreeMap;
+use std::format;
 use std::time::Duration;
 
 use crate::error::{AgentError, Result};
-use crate::memory::{ConversationHistory, Role};
+use crate::memory::Role;
 
 #[derive(Clone)]
 pub struct LLMConfig {
     pub base_url: String,
     pub model: String,
-    pub api_key: Option<String>, 
-    pub provider: String, 
+    pub api_key: Option<String>,
+    pub provider: String,
 }
 
 impl std::fmt::Debug for LLMConfig {
@@ -21,7 +22,7 @@ impl std::fmt::Debug for LLMConfig {
             .field("base_url", &self.base_url)
             .field("model", &self.model)
             .field("provider", &self.provider)
-            .field("api_key", &"***") 
+            .field("api_key", &"***")
             .finish()
     }
 }
@@ -44,8 +45,7 @@ impl LLMConfig {
                 "anthropic" => "https://api.anthropic.com/v1/messages".to_string(),
                 other => {
                     return Err(AgentError::InternalError(format!(
-                        "Bilinmeyen provider: '{}'. Bilinen değerler: gemini, openai, ollama, anthropic. \
-                         Farklı bir sağlayıcı kullanacaksan base_url'i elle belirt.",
+                        "Unknown provider: '{}'. Known values: gemini, openai, ollama, anthropic. If you want to use a different provider, specify the base_url manually.",
                         other
                     )));
                 }
@@ -79,16 +79,16 @@ impl LLMClient {
 
     pub async fn send_request(
         &self,
-        history: &ConversationHistory,
+        messages: Vec<crate::memory::Message>,
         tools_schema: Option<Vec<Value>>,
     ) -> Result<Value> {
         if self.config.provider == "anthropic" {
-            return self.send_anthropic_request(history, tools_schema).await;
+            return self.send_anthropic_request(messages, tools_schema).await;
         }
 
         let mut payload = json!({
             "model": self.config.model,
-            "messages": history.messages,
+            "messages": messages,
         });
 
         if let Some(schemas) = tools_schema {
@@ -104,45 +104,55 @@ impl LLMClient {
             request_builder = request_builder.bearer_auth(key);
         }
 
-        let response = request_builder
-            .json(&payload)
-            .send()
-            .await?;
+        let response = request_builder.json(&payload).send().await?;
 
         if !response.status().is_success() {
             let status_code = response.status();
             let err_msg = response.text().await.unwrap_or_default();
             return Err(AgentError::InternalError(format!(
-                "API Hatası [{}]: {}",
+                "API Error [{}]: {}",
                 status_code, err_msg
             )));
         }
 
         let response_json: Value = response.json().await?;
         Ok(response_json)
-    } 
+    }
 
     async fn send_anthropic_request(
         &self,
-        history: &ConversationHistory,
+        messages: Vec<crate::memory::Message>,
         tools_schema: Option<Vec<Value>>,
     ) -> Result<Value> {
-        let system_prompt = history
-            .messages
+        
+        let system_prompt = messages
             .iter()
-            .find(|m| m.role == Role::System)
-            .and_then(|m| m.content.clone())
-            .unwrap_or_default();
+            .filter(|m| m.role == Role::System)
+            .filter_map(|m| m.content.clone())
+            .collect::<Vec<String>>()
+            .join("\n\n");
 
-        let filtered_messages: Vec<Value> = history
-            .messages
+        let filtered_messages: Vec<Value> = messages
             .iter()
             .filter(|m| m.role != Role::System)
             .map(|m| {
-                json!({
-                    "role": if m.role == Role::Assistant { "assistant" } else { "user" },
-                    "content": m.content.clone().unwrap_or_default()
-                })
+                if m.role == Role::Tool {
+                    json!({
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": m.tool_call_id.clone().unwrap_or_default(),
+                                "content": m.content.clone().unwrap_or_default()
+                            }
+                        ]
+                    })
+                } else {
+                    json!({
+                        "role": if m.role == Role::Assistant { "assistant" } else { "user" },
+                        "content": m.content.clone().unwrap_or_default()
+                    })
+                }
             })
             .collect();
 
@@ -159,23 +169,22 @@ impl LLMClient {
             }
         }
 
-        let mut request_builder = self.http_client.post(&self.config.base_url)
+        let mut request_builder = self
+            .http_client
+            .post(&self.config.base_url)
             .header("anthropic-version", "2023-06-01");
 
         if let Some(key) = &self.config.api_key {
             request_builder = request_builder.header("x-api-key", key);
         }
 
-        let response = request_builder
-            .json(&payload)
-            .send()
-            .await?;
+        let response = request_builder.json(&payload).send().await?;
 
         if !response.status().is_success() {
             let status_code = response.status();
             let err_msg = response.text().await.unwrap_or_default();
             return Err(AgentError::InternalError(format!(
-                "Anthropic API Hatası [{}]: {}",
+                "Anthropic API error [{}]: {}",
                 status_code, err_msg
             )));
         }
@@ -189,10 +198,9 @@ impl LLMClient {
         schemas: Option<Vec<serde_json::Value>>,
         callback: &Option<Box<dyn Fn(String) + Send + Sync>>,
     ) -> crate::error::Result<crate::memory::Message> {
-        
         if self.config.provider == "anthropic" {
             return Err(AgentError::InternalError(
-                "Anthropic için stream (SSE) desteği henüz eklenmedi. Lütfen 'run' metodunu kullanın.".to_string()
+                "Stream (SSE) support for Anthropic has not been added yet. Please use the 'run' method.".to_string()
             ));
         }
 
@@ -203,9 +211,9 @@ impl LLMClient {
         });
 
         if let Some(s) = schemas {
-            body.as_object_mut()
-                .unwrap()
-                .insert("tools".to_string(), serde_json::json!(s));
+            if let Some(obj) = body.as_object_mut() {
+                obj.insert("tools".to_string(), serde_json::json!(s));
+            }
         }
 
         let mut request_builder = self.http_client.post(&self.config.base_url);
@@ -218,27 +226,26 @@ impl LLMClient {
             .json(&body)
             .send()
             .await
-            .map_err(|e| AgentError::InternalError(format!("Ağ hatası: {}", e)))?;
+            .map_err(|e| AgentError::InternalError(format!("Network error: {}", e)))?;
 
         if !response.status().is_success() {
             let status_code = response.status();
             let err_msg = response.text().await.unwrap_or_default();
             return Err(AgentError::InternalError(format!(
-                "API Hatası [{}]: {}",
+                "API Error [{}]: {}",
                 status_code, err_msg
             )));
         }
 
         let mut stream = response.bytes_stream();
         let mut full_text = String::new();
-        let mut tool_calls: BTreeMap<i64, (String, String, String)> = BTreeMap::new();
-        
+        let mut tool_calls: BTreeMap<usize, (String, String, String)> = BTreeMap::new();
         let mut byte_buffer: Vec<u8> = Vec::new();
 
         while let Some(chunk_result) = stream.next().await {
             let chunk = chunk_result
                 .map_err(|e| AgentError::InternalError(format!("Stream buffer error: {}", e)))?;
-            
+
             byte_buffer.extend_from_slice(&chunk);
 
             while let Some(newline_pos) = byte_buffer.iter().position(|&b| b == b'\n') {
@@ -246,42 +253,111 @@ impl LLMClient {
                 let line_str = String::from_utf8_lossy(&line_bytes);
                 let trimmed = line_str.trim();
 
-                if trimmed.starts_with("data: ") {
-                    let data = &trimmed[6..];
+                if trimmed.is_empty() {
+                    continue;
+                }
+                if trimmed.starts_with(':') {
+                    continue;
+                }
+
+                if let Some(event_str) = trimmed.strip_prefix("event:") {
+                    let event_type = event_str.trim();
+                    if event_type == "error" {
+                        eprintln!("\n[API NOTICE] The server sent an error event! Reading error details...");
+                    }
+                    continue;
+                }
+
+                if let Some(data_str) = trimmed.strip_prefix("data:") {
+                    let data = data_str.trim();
                     if data == "[DONE]" {
                         continue;
                     }
-                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
-                        let delta = &json["choices"][0]["delta"];
-                        if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
-                            full_text.push_str(content);
-                            if let Some(cb) = callback {
-                                cb(content.to_string());
+
+                    match serde_json::from_str::<serde_json::Value>(data) {
+                        Ok(json) => {
+                            if let Some(err) = json.get("error") {
+                                return Err(AgentError::InternalError(format!(
+                                    "API stream error: {}",
+                                    err
+                                )));
+                            }
+
+                            if let Some(choices) = json.get("choices").and_then(|c| c.as_array()) {
+                                if let Some(choice) = choices.get(0) {
+                                    if let Some(delta) = choice.get("delta") {
+                                        if let Some(content) =
+                                            delta.get("content").and_then(|c| c.as_str())
+                                        {
+                                            full_text.push_str(content);
+                                            if let Some(cb) = callback {
+                                                cb(content.to_string());
+                                            }
+                                        }
+
+                                        if let Some(tc_array) =
+                                            delta.get("tool_calls").and_then(|tc| tc.as_array())
+                                        {
+                                            for tc in tc_array {
+                                                let idx = tc
+                                                    .get("index")
+                                                    .and_then(|i| i.as_u64())
+                                                    .unwrap_or(0)
+                                                    as usize;
+                                                let entry =
+                                                    tool_calls.entry(idx).or_insert_with(|| {
+                                                        (
+                                                            String::new(),
+                                                            String::new(),
+                                                            String::new(),
+                                                        )
+                                                    });
+                                                if let Some(id) =
+                                                    tc.get("id").and_then(|i| i.as_str())
+                                                {
+                                                    entry.0.push_str(id);
+                                                }
+                                                if let Some(func) = tc.get("function") {
+                                                    if let Some(name) =
+                                                        func.get("name").and_then(|n| n.as_str())
+                                                    {
+                                                        entry.1.push_str(name);
+                                                    }
+                                                    if let Some(args) = func
+                                                        .get("arguments")
+                                                        .and_then(|a| a.as_str())
+                                                    {
+                                                        entry.2.push_str(args);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
-
-                        if let Some(tc_array) = delta.get("tool_calls").and_then(|tc| tc.as_array()) {
-                            for tc in tc_array {
-                                let idx = tc.get("index").and_then(|i| i.as_i64()).unwrap_or(0);
-                                let entry = tool_calls.entry(idx).or_insert_with(|| {
-                                    (String::new(), String::new(), String::new())
-                                });
-                                if let Some(id) = tc.get("id").and_then(|i| i.as_str()) {
-                                    entry.0.push_str(id);
-                                }
-                                if let Some(func) = tc.get("function") {
-                                    if let Some(name) = func.get("name").and_then(|n| n.as_str()) {
-                                        entry.1.push_str(name);
-                                    }
-                                    if let Some(args) =
-                                        func.get("arguments").and_then(|a| a.as_str())
-                                    {
-                                        entry.2.push_str(args);
-                                    }
-                                }
-                            }
+                        Err(e) => {
+                            eprintln!("\n[SYSTEM WARNING] Could not parse the incoming stream chunk: {}. Data: {}", e, data);
                         }
                     }
+                } else if trimmed.starts_with("{") {
+                    if let Ok(err_json) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                        if err_json.get("error").is_some() {
+                            return Err(AgentError::InternalError(format!(
+                                "Hidden stream error detected: {}",
+                                err_json
+                            )));
+                        }
+                    }
+                    eprintln!(
+                        "\n[SYSTEM WARNING] Unexpected data format received: {}",
+                        trimmed
+                    );
+                } else {
+                    eprintln!(
+                        "\n[SYSTEM WARNING] Not JSON and not in data format. Skipping: {}",
+                        trimmed
+                    );
                 }
             }
         }
@@ -305,7 +381,11 @@ impl LLMClient {
 
             Ok(crate::memory::Message {
                 role: crate::memory::Role::Assistant,
-                content: None,
+                content: if full_text.trim().is_empty() {
+                    None
+                } else {
+                    Some(full_text)
+                },
                 tool_calls: Some(serde_json::json!(tc_json)),
                 tool_call_id: None,
             })

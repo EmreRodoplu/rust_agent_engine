@@ -1,8 +1,7 @@
-use std::collections::HashMap;
 use serde_json::{json, Value};
-
-use crate::tools::Tool;
+use std::collections::HashMap;
 use crate::error::{AgentError, Result};
+use crate::tools::Tool;
 
 pub struct ToolPool {
     tools: HashMap<String, Box<dyn Tool>>,
@@ -18,7 +17,7 @@ impl ToolPool {
     }
 
     pub fn register_tool(&mut self, tool: Box<dyn Tool>) {
-        let tool_name = tool.name(); 
+        let tool_name = tool.name();
         let full_schema = json!({
             "type": "function",
             "function": {
@@ -28,9 +27,8 @@ impl ToolPool {
             }
         });
 
-        self.cached_schemas.retain(|s| {
-            s["function"]["name"].as_str() != Some(tool_name.as_str())
-        });
+        self.cached_schemas
+            .retain(|s| s["function"]["name"].as_str() != Some(tool_name.as_str()));
         self.cached_schemas.push(full_schema);
         self.tools.insert(tool_name, tool);
     }

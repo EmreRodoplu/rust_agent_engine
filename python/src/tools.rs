@@ -22,20 +22,44 @@ impl Tool for PythonTool {
         let func = self.func.clone();
         let args_str = args.to_string();
 
-        let result = tokio::task::spawn_blocking(move || {
+        
+        let result = tokio::task::spawn_blocking(move || -> Result<String, AgentError> {
             Python::with_gil(|py| {
-                let json_module = py.import_bound("json")?;
+               
+                let json_module = py.import_bound("json")
+                    .map_err(|e| AgentError::ToolExecutionError(format!("Could not load the JSON module: {}", e)))?;
+                
                 let kwargs = json_module
-                    .getattr("loads")?
-                    .call1((args_str,))?
-                    .downcast_into::<PyDict>()?;
-                let res = func.bind(py).call((), Some(&kwargs))?;
-                res.str()?.extract::<String>()
+                    .getattr("loads")
+                    .map_err(|e| AgentError::ToolExecutionError(format!("The 'loads' method was not found: {}", e)))?
+                    .call1((&args_str,))
+                    .map_err(|e| AgentError::ToolExecutionError(format!("JSON parse error: {}", e)))?
+                    .downcast_into::<PyDict>()
+                    .map_err(|e| AgentError::ToolExecutionError(format!("Dictionary conversion error: {}", e)))?;
+
+                
+                match func.bind(py).call((), Some(&kwargs)) {
+                    Ok(res) => {
+                        let out_str: String = res.str()
+                            .map_err(|e| AgentError::ToolExecutionError(format!("Could not convert output to string: {}", e)))?
+                            .extract()
+                            .map_err(|e| AgentError::ToolExecutionError(format!("String extraction error: {}", e)))?;
+                        Ok(out_str)
+                    },
+                    Err(py_err) => {
+                        let err_msg = py_err.value_bound(py).to_string();
+                        
+                        println!("[SECURITY WALL] The agent sent invalid parameters. Self-healing triggered!");
+                        Err(AgentError::ToolExecutionError(
+                            format!("(PYDANTIC SECURITY WALL) Function parameters are invalid: {}. Please correct the JSON data types to match the schema and try again.", err_msg)
+                        ))
+                    }
+                }
             })
         })
         .await
-        .map_err(|e| AgentError::ToolExecutionError(format!("Thread hatası: {}", e)))?
-        .map_err(|e| AgentError::ToolExecutionError(format!("Python fonksiyon hatası: {}", e)))?;
+        .map_err(|e| AgentError::ToolExecutionError(format!("Thread panic: {}", e)))??; 
+        
         Ok(result)
     }
 }

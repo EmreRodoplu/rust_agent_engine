@@ -8,8 +8,10 @@ on:
 jobs:
   build:
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ["3.10", "3.11", "3.12"] 
 
     runs-on: ${{ matrix.os }}
 
@@ -20,10 +22,10 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Setup Python
+      - name: Setup Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: ${{ matrix.python-version }}
 
       - name: Install maturin
         run: pip install maturin
@@ -34,7 +36,9 @@ jobs:
           maturin build \
             --manifest-path python/Cargo.toml \
             --release \
-            --out dist
+            --out dist \
+            --manylinux auto \
+            -i python${{ matrix.python-version }}
 
       - name: Build wheels (Windows)
         if: matrix.os == 'windows-latest'
@@ -43,12 +47,13 @@ jobs:
           maturin build \
             --manifest-path python/Cargo.toml \
             --release \
-            --out dist
+            --out dist \
+            -i python${{ matrix.python-version }}
 
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
-          name: wheels-${{ matrix.os }}
+          name: wheels-${{ matrix.os }}-${{ matrix.python-version }}
           path: dist/*
 
   sdist:
@@ -64,7 +69,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: "3.10" 
 
       - name: Install maturin
         run: pip install maturin

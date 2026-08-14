@@ -1,14 +1,22 @@
 use pyo3::prelude::*;
-use pyo3_stub_gen::define_stub_info_gatherer;
+
 
 mod tools;
 mod engine;
+mod memory;
+mod rag;
+mod utils;
+mod schedule;
 
 #[pymodule]
-fn rust_agent_engine(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<engine::PyLLMConfig>()?;
+fn _rust_agent_engine(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    
     m.add_class::<engine::PyAgent>()?;
+    m.add_class::<engine::PyLLMConfig>()?;
+    m.add_class::<memory::PyAgentMemory>()?;
+    m.add_class::<rag::PyRagEngine>()?;
+    m.add_class::<schedule::PyTaskManager>()?;
+    
     Ok(())
 }
 
-define_stub_info_gatherer!(stub_info);

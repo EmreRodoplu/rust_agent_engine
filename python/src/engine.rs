@@ -1,30 +1,36 @@
 use pyo3::prelude::*;
 use pyo3::exceptions::PyRuntimeError;
-use pyo3::types::{PyAny, PyDict, PyTuple};
-use std::sync::OnceLock;
+use pyo3::types::{PyAny, PyDict};
+use std::sync::{Arc, OnceLock};
 use tokio::runtime::Runtime;
+use rust_agent_engine_core::memory::AgentMemory;
+use rust_agent_engine_core::memory::in_memory::InMemoryHistory; 
 use rust_agent_engine_core::client::LLMConfig;
 use rust_agent_engine_core::agent::Agent;
 use rust_agent_engine_core::error::AgentError;
+use rust_agent_engine_core::tools::rag_tool::RagSearchTool;
 use serde_json::json;
-use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
+use crate::utils::infer_json_schema_type;
 
 use crate::tools::PythonTool;
+use crate::memory::PyAgentMemory; 
+
+use crate::rag::PyRagEngine; 
 
 static SHARED_RUNTIME: OnceLock<Runtime> = OnceLock::new();
 
 fn get_runtime() -> &'static Runtime {
-    SHARED_RUNTIME.get_or_init(|| Runtime::new().expect("Tokio Runtime başlatılamadı!"))
+    SHARED_RUNTIME.get_or_init(|| {
+        Runtime::new().expect("[Critical Error] Failed to create Tokio runtime! Engine cannot start.")
+    })
 }
 
-#[gen_stub_pyclass]
 #[pyclass(name = "LLMConfig")]
 #[derive(Clone)]
 pub struct PyLLMConfig {
     pub inner: LLMConfig,
 }
 
-#[gen_stub_pymethods]
 #[pymethods]
 impl PyLLMConfig {
     #[new]
@@ -41,31 +47,45 @@ impl PyLLMConfig {
     }
 }
 
-#[gen_stub_pyclass]
 #[pyclass(name = "Agent")]
 pub struct PyAgent {
     inner: Agent, 
 }
 
-#[gen_stub_pymethods]
 #[pymethods]
 impl PyAgent {
     #[new]
-    pub fn new(name: &str, system_prompt: &str, config: &PyLLMConfig) -> PyResult<Self> {
+    #[pyo3(signature = (name, system_prompt, config, memory=None))] 
+    pub fn new(
+        name: &str, 
+        system_prompt: &str, 
+        config: &PyLLMConfig,
+        memory: Option<PyAgentMemory> 
+    ) -> PyResult<Self> {
+        let mem_arc: Arc<dyn AgentMemory> = match memory {
+            Some(m) => m.inner,
+            None => Arc::new(InMemoryHistory::new()),
+        };
+        
         Ok(Self {
-            inner: Agent::new(name, system_prompt, config.inner.clone()),
+            inner: Agent::new(name, system_prompt, config.inner.clone(), mem_arc),
         })
     }
 
-    #[pyo3(signature = (user_input, stream_callback=None, prune=None))]
+    #[pyo3(signature = (user_input, session_id=None, stream_callback=None, max_tokens=None, max_steps=None))]
     pub fn run(
         &self,
         py: Python,
         user_input: &str,
+        session_id: Option<&str>, 
         stream_callback: Option<PyObject>,
-        prune: Option<usize>,
+        max_tokens: Option<usize>,
+        max_steps: Option<usize>
     ) -> PyResult<String> {
-        let cb = stream_callback.map(|py_cb| {
+        
+        let actual_session_id = session_id.unwrap_or("default_session");
+        
+        let cb = stream_callback.map(|py_cb: Py<PyAny>| {
             let py_cb = std::sync::Arc::new(py_cb);
 
             Box::new(move |token: String| {
@@ -77,17 +97,21 @@ impl PyAgent {
                 });
             }) as Box<dyn Fn(String) + Send + Sync>
         });
-
+        
+        let session_id_str = actual_session_id.to_string();
+        let user_input_str = user_input.to_string();
         let result: Result<String, AgentError> = py.allow_threads(|| {
             get_runtime().block_on(async { 
-                self.inner.run_with_stream(user_input, cb).await 
+                self.inner.run_with_stream(&session_id_str, &user_input_str, cb, max_steps.unwrap_or(15)).await
             })
         });
-
+        let prune_session_str = actual_session_id.to_string();
         py.allow_threads(|| {
             get_runtime().block_on(async {
-                let mut history = self.inner.history.lock().await;
-                history.prune(prune.unwrap_or(20));
+                let limit = max_tokens.unwrap_or(4096);
+                if let Err(e) = self.inner.memory.prune_by_tokens(&prune_session_str, limit).await {
+                    eprintln!("[Memory Warning] Failed to prune session '{}': {}", prune_session_str, e);
+                }
             });
         });
 
@@ -101,13 +125,13 @@ impl PyAgent {
         let description: String = f
             .getattr("__doc__")
             .and_then(|d| d.extract())
-            .unwrap_or_else(|_| "Açıklama bulunamadı.".to_string());
+            .unwrap_or_else(|_| "No description provided.".to_string());
 
         let mut properties = serde_json::Map::new();
         let mut required = Vec::new();
 
         let inspect = py.import_bound("inspect")?;
-        let sig = inspect.getattr("signature")?.call1((f,))?;
+        let sig = inspect.getattr("signature")?.call1((&func,))?; 
         let builtins = py.import_bound("builtins")?;
         let params_mapping = sig.getattr("parameters")?;
         let params_obj = builtins.getattr("dict")?.call1((params_mapping,))?;
@@ -151,66 +175,29 @@ impl PyAgent {
         self.inner.register_tool(Box::new(python_tool));
         Ok(func)
     }
-}
-
-fn infer_json_schema_type(annotation: &Bound<'_, PyAny>) -> serde_json::Value {
-    if let (Ok(origin), Ok(args)) = (
-        annotation.getattr("__origin__"),
-        annotation.getattr("__args__"),
-    ) {
-        let origin_name: String = origin
-            .getattr("__name__")
-            .and_then(|n| n.extract())
-            .unwrap_or_default();
-
-        let args_vec: Vec<Bound<'_, PyAny>> = args
-            .downcast_into::<PyTuple>()
-            .map(|t| t.iter().collect())
-            .unwrap_or_default();
-
-        let is_none_type = |a: &Bound<'_, PyAny>| -> bool {
-            a.getattr("__name__")
-                .and_then(|n| n.extract::<String>())
-                .unwrap_or_default()
-                == "NoneType"
-        };
-        
-        let mut has_none = false;
-        let mut inner_type: Option<&Bound<'_, PyAny>> = None;
-        for a in &args_vec {
-            if is_none_type(a) {
-                has_none = true;
-            } else if inner_type.is_none() {
-                inner_type = Some(a);
-            }
-        }
-        if has_none {
-            if let Some(inner) = inner_type {
-                return infer_json_schema_type(inner);
-            }
-        }
-
-        if origin_name == "list" {
-            return json!({ "type": "array", "items": { "type": "string" } });
-        }
-        if origin_name == "dict" {
-            return json!({ "type": "object" });
-        }
+    
+    #[pyo3(signature = (rag_engine, collection, limit=3))]
+    pub fn add_rag_tool(&mut self, rag_engine: &PyRagEngine, collection: String, limit: usize) {
+        let tool = RagSearchTool::new(
+            rag_engine.embedder.clone(), 
+            rag_engine.vector_store.clone(), 
+            collection, 
+            limit
+        );
+        self.inner.register_tool(Box::new(tool));
     }
 
-    let type_name: String = annotation
-        .getattr("__name__")
-        .and_then(|n| n.extract())
-        .unwrap_or_else(|_| "string".to_string());
-
-    let json_type = match type_name.as_str() {
-        "int" => "integer",
-        "float" => "number",
-        "bool" => "boolean",
-        "list" => "array",
-        "dict" => "object",
-        _ => "string",
-    };
-
-    json!({ "type": json_type })
+    #[pyo3(signature = ())]
+    pub fn get_active_sessions(&self, py: Python) -> PyResult<Vec<String>> {
+        let result = py.allow_threads(|| {
+            get_runtime().block_on(async {
+                self.inner.memory.get_active_sessions().await
+            })
+        });
+        
+        match result {
+            Ok(sessions) => Ok(sessions),
+            Err(e) => Err(PyRuntimeError::new_err(format!("Could not read memory sessions: {}", e))),
+        }
+    }
 }

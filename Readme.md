@@ -1,250 +1,243 @@
-# 🦀 Rust Agent Engine
+# Rust Agent Engine
 
-Rust Agent Engine is a lightweight AI agent library powered by a fast Rust core with a simple Python API.
+Rust Agent Engine is a Python-first agent framework powered by a high-performance Rust core. It is designed for building autonomous AI agents that can use tools, maintain memory, and retrieve knowledge with RAG while keeping the developer experience simple and fast.
 
-It allows you to easily create AI agents using LLM providers such as OpenAI, Anthropic, Gemini, and local models like Ollama.
+## Why this project exists
 
----
+This library gives you the best of both worlds:
 
-## 🚀 Installation
+- Python for easy application development and orchestration
+- Rust for speed, concurrency, and efficient agent execution
 
-### Using uv (recommended)
+It is useful when you want to build systems such as:
 
-```bash
-uv pip install rust-agent-engine
-```
+- LLM-powered assistants
+- internal knowledge bots
+- document-aware agents with retrieval
+- tool-using workflows and automation
+- multi-session agent applications
 
-### Using pip
+## Features
 
-```bash
-pip install rust-agent-engine
-```
+- High-performance Rust execution engine
+- Python API for building agents quickly
+- Custom Python functions can be registered as agent tools
+- Session memory support with in-memory and Redis backends
+- Retrieval-augmented generation (RAG) for document-aware answers
+- CLI for creating projects, validating config, and running chat sessions
+- Built-in API server support with FastAPI
 
----
+## Installation
 
-## ⚡ Quick Start
+If you are using a virtual environment, activate it first and then install the package.
 
-Create a simple AI agent in seconds:
+## Python usage
+
+The main pattern is simple: create an `Agent`, configure an `LLMConfig`, optionally attach memory, and register Python functions as tools.
+
+### Basic agent example
 
 ```python
 from rust_agent_engine import Agent, LLMConfig
+from rust_agent_engine.memory import AgentMemory
 
 config = LLMConfig(
-    model="gpt-4o",
+    model="gpt-4o-mini",
+    base_url="https://api.openai.com/v1/chat/completions",
     api_key="YOUR_API_KEY",
-    provider="openai"
 )
 
 agent = Agent(
     name="Assistant",
-    system_prompt="You are a helpful AI assistant.",
-    config=config
-)
-
-response = agent.run(
-    user_input="What is Rust?"
-)
-
-print(response)
-```
-
----
-
-## 🖥️ Local Model Usage (Ollama)
-
-You can also use local models such as Ollama.
-
-```python
-from rust_agent_engine import Agent, LLMConfig
-
-config = LLMConfig(
-    model="llama3",
-    provider="ollama",
-    api_key=""
-)
-
-agent = Agent(
-    name="LocalAssistant",
-    system_prompt="You give short and precise answers.",
-    config=config
-)
-
-response = agent.run("What is Python?")
-print(response)
-```
-
----
-
-## 🌊 Streaming Usage
-
-Receive tokens in real-time as they are generated:
-
-```python
-from rust_agent_engine import Agent, LLMConfig
-
-config = LLMConfig(
-    model="gpt-4o",
-    api_key="YOUR_API_KEY",
-    provider="openai"
-)
-
-agent = Agent(
-    name="Streamer",
     system_prompt="You are a helpful assistant.",
-    config=config
+    config=config,
+    memory=AgentMemory.in_memory(),
 )
 
-def stream(token: str):
-    print(token, end="", flush=True)
-
-agent.run(
-    user_input="What is artificial intelligence?",
-    stream_callback=stream
-)
-```
-## Multi Agent
-In Rust Agent Engine, an agent can be used as a **tool inside another agent**.
-
-This allows you to build hierarchical systems where:
-- One agent delegates work
-- Another agent executes it
-- The result is returned as a tool output
-```python
-import sys
-from rust_agent_engine import Agent,LLMConfig
-import os
-from dotenv import load_dotenv
-load_dotenv()
-
-config = LLMConfig(
-    model="gemini-3.5-flash",  # Local or cloud model
-    provider="gemini",
-    api_key=os.getenv("API_KEY")
-)
-
+@agent.register_tool
 def add_numbers(a: float, b: float) -> str:
-    """Adds two numbers and returns the result."""
-    print(f"\n[MATH TOOL] Calculating: {a} + {b}")
     return str(a + b)
 
-
-def multiply_numbers(a: float, b: float) -> str:
-    """Multiplies two numbers and returns the result."""
-    print(f"\n[MATH TOOL] Calculating: {a} * {b}")
-    return str(a * b)
-
-
-math_agent = Agent(
-    name="MathExpert",
-    system_prompt=(
-        "You are a math genius. Focus only on numerical operations, "
-        "use tools for calculations, and return precise results."
-    ),
-    config=config
-)
-
-math_agent.register_tool(add_numbers)
-math_agent.register_tool(multiply_numbers)
-
-
-def write_file(file_name: str, content: str) -> str:
-    """Writes the given content to a file."""
-    print(f"\n[FILE TOOL] Writing to '{file_name}' on disk...")
-    try:
-        with open(file_name, "w", encoding="utf-8") as f:
-            f.write(content)
-        return f"{file_name} has been successfully created and saved."
-    except Exception as e:
-        return f"File write error: {e}"
-
-
-file_agent = Agent(
-    name="FileExpert",
-    system_prompt="You are an expert in system file operations. Use tools to handle file writing tasks.",
-    config=config
-)
-
-file_agent.register_tool(write_file)
-
-
-def delegate_to_math(task_description: str) -> str:
-    """Delegates all math-related tasks to the math expert agent."""
-    print(f"\n[CHEF ROUTING] Math Agent activated -> Task: {task_description}")
-    return math_agent.run(user_input=task_description)
-
-
-def delegate_to_file(task_description: str) -> str:
-    """Delegates all file-related tasks to the file expert agent."""
-    print(f"\n[CHEF ROUTING] File Agent activated -> Task: {task_description}")
-    return file_agent.run(user_input=task_description)
-
-
-chef_agent = Agent(
-    name="ChefOrchestrator",
-    system_prompt=(
-        "You are the system orchestrator agent. "
-        "IMPORTANT: NEVER perform math or file operations yourself. "
-        "You MUST use the provided tools instead.\n\n"
-        "1. Use 'delegate_to_math' for math tasks.\n"
-        "2. Use 'delegate_to_file' for file operations.\n\n"
-        "Always return only the final result after tool execution."
-    ),
-    config=config
-)
-
-chef_agent.register_tool(delegate_to_math)
-chef_agent.register_tool(delegate_to_file)
-
-
-request = (
-    "Multiply 145 by 28. Then save the result "
-    "into a file named 'hesap_raporu.txt'."
-)
-
-print(f"User Request: {request}\n")
-print("Chef Agent is planning and executing...\n" + "=" * 60)
-print("Final Output Stream: ", end="")
-
-
-def callback(token: str):
-    print(token, end="", flush=True)
-
-
-try:
-    chef_agent.run(user_input=request, stream_callback=callback)
-
-    print("\n\n" + "=" * 60)
-    print("[SUCCESS] Agent system completed the task. No deadlock occurred.")
-
-except Exception as e:
-    print(f"\n[ERROR] System failed: {e}")
-
+response = agent.run(user_input="What is 12 + 37?")
+print(response)
 ```
----
----
 
-## 📦 Features
+This is the most common usage pattern in Python: the agent reasons with the model and can call your registered Python functions when needed.
 
-- ⚡ Fast Rust-based core
-- 🐍 Simple Python API
-- 🤖 Supports OpenAI / Anthropic / Gemini / Ollama
-- 🌊 Streaming responses
-- 🧠 Lightweight agent system
-- 🔌 Works with any OpenAI-compatible API
+### Real tool-based workflow
 
----
+```python
+from rust_agent_engine import Agent, LLMConfig
 
-## 💡 Purpose
+config = LLMConfig(
+    model="gpt-4o-mini",
+    base_url="https://api.openai.com/v1/chat/completions",
+    api_key="YOUR_API_KEY",
+)
 
-This library is designed to:
+agent = Agent(
+    name="ToolAgent",
+    system_prompt="Use tools when needed and answer precisely.",
+    config=config,
+)
 
-- Build simple AI agents easily
-- Integrate LLMs quickly
-- Run both local and cloud models
-- Provide a minimal and fast agent framework
+@agent.register_tool
+def multiply(a: float, b: float) -> float:
+    return a * b
 
----
+@agent.register_tool
+def get_weather(city: str) -> str:
+    return f"The weather in {city} is sunny and 24C."
 
-## 📄 License
+result = agent.run(user_input="Multiply 8 by 7 and tell me the weather in Berlin.")
+print(result)
+```
 
-MIT License
+This is one of the main strengths of the library: your Python code can become callable by the agent during runtime.
+
+### RAG example
+
+RAG is useful when the agent needs to answer based on documents or a knowledge base instead of only the model context.
+
+```python
+from rust_agent_engine import Agent, LLMConfig
+from rust_agent_engine.memory import AgentMemory
+from rust_agent_engine.rag import RagEngine
+
+rag = RagEngine(
+    model="text-embedding-3-small",
+    base_url="https://api.openai.com/v1/embeddings",
+    api_key="YOUR_API_KEY",
+)
+
+rag.load_document(
+    collection="company_rules",
+    text="Remote work is required two days per week.",
+    source_name="rules.txt",
+)
+
+config = LLMConfig(
+    model="gpt-4o-mini",
+    base_url="https://api.openai.com/v1/chat/completions",
+    api_key="YOUR_API_KEY",
+)
+
+agent = Agent(
+    name="HR_Assistant",
+    system_prompt="Answer using the available documents and memory.",
+    config=config,
+    memory=AgentMemory.in_memory(),
+)
+
+agent.add_rag_tool(rag, collection="company_rules", limit=3)
+print(agent.run(user_input="How many days of remote work are required?"))
+```
+
+This pattern is commonly used for knowledge-base assistants, company policies, documentation search, and FAQ bots.
+
+## CLI usage
+
+The project also provides a command-line interface for practical project workflows.
+
+### 1) Initialize a new project
+
+```bash
+cd python
+rust-agent init
+```
+
+This creates a basic project with:
+
+- `agent_config.yml`
+- `custom_tools.py`
+
+### 2) Validate your setup
+
+```bash
+rust-agent validate --config agent_config.yml --tools-file custom_tools.py
+```
+
+This checks that the YAML config and Python tool file are valid.
+
+### 3) Start an interactive chat session
+
+```bash
+rust-agent chat --agent System_Assistant --config agent_config.yml --tools-file custom_tools.py
+```
+
+This is the main CLI usage for testing and interacting with the agent in real time.
+
+### 4) Start a FastAPI server for your agent
+
+```bash
+rust-agent serve --agent System_Assistant --config agent_config.yml --tools-file custom_tools.py --host 0.0.0.0 --port 8000
+```
+
+This exposes the agent as an HTTP API and is useful for integrating it into a web app or backend service.
+
+### 5) Run the agent as a daemon
+
+```bash
+rust-agent daemon --agent System_Assistant --config agent_config.yml --tools-file custom_tools.py
+```
+
+A daemon is useful when you want the agent to keep running in the background and process scheduled or background tasks without requiring an interactive terminal session. Instead of only responding to one manual chat, the agent stays alive in memory and can be used for long-running automation, periodic jobs, or background orchestration.
+
+Typical daemon use cases include:
+
+- scheduled task execution
+- background assistant workers
+- recurring workflows triggered by cron or orchestration systems
+- long-lived agent services that monitor events or perform automated actions
+
+This mode is especially useful when the agent acts as a worker rather than a direct interactive chatbot.
+
+### 6) RAG management commands
+
+```bash
+rust-agent rag ingest --collection company_rules --dir ./docs --type txt --config agent_config.yml
+rust-agent rag status --collection company_rules --config agent_config.yml
+rust-agent rag drop --collection company_rules --config agent_config.yml
+```
+
+These commands let you ingest documents, inspect a collection, and remove it when needed.
+
+### 6) Memory commands
+
+```bash
+rust-agent memory list --agent System_Assistant --config agent_config.yml
+rust-agent memory prune --agent System_Assistant --session cli_session_001 --max-tokens 2048 --config agent_config.yml
+```
+
+Use these commands to inspect active sessions and prune memory when needed.
+
+### 7) List registered tools
+
+```bash
+rust-agent tools list --tools-file custom_tools.py
+```
+
+This shows the tools loaded from your custom Python file.
+
+## Typical workflow
+
+A common real-world setup looks like this:
+
+1. Run `rust-agent init` to create the starter files.
+2. Define your custom Python tools in `custom_tools.py`.
+3. Add your LLM settings in `agent_config.yml`.
+4. Run `rust-agent validate` to confirm the project is valid.
+5. Start a chat with `rust-agent chat`, expose an API with `rust-agent serve`, or keep it alive in the background with `rust-agent daemon`.
+6. Add a RAG data store when the agent needs document-aware answers.
+
+## Summary
+
+Rust Agent Engine is designed for developers who want to build agent applications in Python without giving up performance. It is especially useful when you need:
+
+- fast agent execution
+- Python-based tool orchestration
+- memory-aware conversations
+- retrieval over documents
+- easy CLI-driven development and testing
+
+This combination makes it a practical framework for both experimentation and real production workflows.

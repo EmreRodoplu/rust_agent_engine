@@ -4,3 +4,4 @@ pub mod pool;
 pub mod memory;
 pub mod client;
 pub mod agent;
+pub mod rag;

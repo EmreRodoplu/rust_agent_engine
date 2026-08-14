@@ -1,87 +1,124 @@
 use serde_json::Value;
+use std::format;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 
 use crate::client::{LLMClient, LLMConfig};
 use crate::error::{AgentError, Result};
-use crate::memory::{ConversationHistory, Message, Role};
+use crate::memory::{AgentMemory, Message, Role};
 use crate::pool::ToolPool;
 
 pub struct Agent {
     pub name: String,
     pub system_prompt: String,
     client: LLMClient,
-    tools: Option<Arc<ToolPool>>,
-    pub history: Mutex<ConversationHistory>, 
+    tools: Option<Arc<RwLock<ToolPool>>>,
+    pub memory: Arc<dyn AgentMemory>, 
 }
 
 impl Agent {
-    pub fn new(name: &str, system_prompt: &str, config: LLMConfig) -> Self {
-        let mut history = ConversationHistory::new();
-        history.add_system_prompt(system_prompt);
-
+    pub fn new(
+        name: &str, 
+        system_prompt: &str, 
+        config: LLMConfig, 
+        memory: Arc<dyn AgentMemory>
+    ) -> Self {
         Self {
             name: name.to_string(),
             system_prompt: system_prompt.to_string(),
             client: LLMClient::new(config),
             tools: None,
-            history: Mutex::new(history), 
+            memory,
         }
     }
 
-    pub fn set_tools(&mut self, pool: Arc<ToolPool>) {
+    pub fn set_tools(&mut self, pool: Arc<RwLock<ToolPool>>) {
         self.tools = Some(pool);
     }
 
     pub fn register_tool(&mut self, tool: Box<dyn crate::tools::Tool>) {
         if self.tools.is_none() {
-            self.tools = Some(Arc::new(crate::pool::ToolPool::new()));
+            self.tools = Some(Arc::new(RwLock::new(crate::pool::ToolPool::new())));
         }
-        if let Some(pool_arc) = &mut self.tools {
-            // Arc içindeki veriyi değiştirmek için güvenli erişim
-            if let Some(pool) = Arc::get_mut(pool_arc) {
+        
+        if let Some(pool_arc) = &self.tools {
+            if let Ok(mut pool) = pool_arc.try_write() {
                 pool.register_tool(tool);
+            } else {
+                eprintln!(
+                    "[SYSTEM WARNING] Agent tools are locked (a background task might be running). Cannot add new tool: {}", 
+                    tool.name()
+                );
             }
         }
     }
 
     pub async fn run_with_stream(
         &self,
+        session_id: &str, 
         user_input: &str,
         callback: Option<Box<dyn Fn(String) + Send + Sync>>,
+        max_steps: usize
     ) -> Result<String> {
-        {
-            
-            let mut history = self.history.lock().await; 
-            history.add_user_message(user_input);
+        
+        let current_history = self.memory.get_history(session_id).await?;
+        
+        let has_system_prompt = current_history.iter().any(|m| m.role == Role::System);
+        if !has_system_prompt && !self.system_prompt.is_empty() {
+            self.memory.add_message(session_id, Message::system(&self.system_prompt)).await?;
         }
 
-        let schemas = self.tools.as_ref().map(|p| p.get_tool_schemas());
-        let max_steps = 15; 
+        self.memory.add_message(session_id, Message::user(user_input)).await?;
+
+        let schemas = if let Some(pool) = &self.tools {
+            Some(pool.read().await.get_tool_schemas())
+        } else {
+            None
+        };
         let mut consecutive_errors = 0; 
 
         for _step in 0..max_steps {
-            let current_messages = {
-                let h = self.history.lock().await;
-                h.messages.clone()
-            };
+            let current_messages = self.memory.get_history(session_id).await?;
 
-            let response_msg = self
+            let response_msg = match self
                 .client
                 .send_stream_request(current_messages, schemas.clone(), &callback)
-                .await?;
-
+                .await 
             {
-                let mut history = self.history.lock().await;
-                history.add_message(response_msg.clone());
-            }
+                Ok(msg) => msg,
+                Err(e) => {
+                    let err_str = e.to_string();
+                    
+                    if err_str.contains("tool_use_failed") || err_str.contains("validation failed") || err_str.contains("invalid_request_error") || err_str.contains("invalid") || err_str.contains("Invalid") {
+                        
+                        println!("[API GUARDRAIL] LLM Provider rejected the malformed tool call! Self-Healing activated.");
+                        
+                        self.memory.add_message(session_id, Message::user(
+                            &format!("SYSTEM WARNING: Your last tool call was rejected by the API server! Details: {}. Please fix the parameter types (e.g., use integer instead of string) and try again.", err_str)
+                        )).await?;
+                        
+                        consecutive_errors += 1;
+                        if consecutive_errors >= 3 {
+                            return Err(AgentError::InternalError(
+                                "Critical Error: LLM hit API validation errors 3 times in a row. Death loop prevented.".to_string()
+                            ));
+                        }
+                        
+                        continue; 
+                    } else {
+                        return Err(e);
+                    }
+                }
+            };
+
+            self.memory.add_message(session_id, response_msg.clone()).await?;
 
             if let Some(tool_calls) = response_msg.tool_calls {
                 let tools_arc = match &self.tools {
                     Some(t) => t.clone(),
                     None => {
                         return Err(AgentError::InternalError(
-                            "Ajan tool çağırdı ama havuz tanımlı değil.".to_string(),
+                            "Agent called a tool but the tool pool is not defined.".to_string(),
                         ));
                     }
                 };
@@ -97,47 +134,58 @@ impl Agent {
                     let pool_clone = tools_arc.clone();
 
                     let task = tokio::spawn(async move {
-                        let args_val: Value = serde_json::from_str(&args_str).unwrap_or(serde_json::json!({}));
-                        
-                        let tool_result = if name.is_empty() {
-                            "HATA: LLM boş/geçersiz bir tool adıyla çağrı yaptı.".to_string()
-                        } else {
-                            match pool_clone.execute_tool(&name, args_val).await {
-                                Ok(output) => output,
-                                Err(e) => format!("HATA: Araç çalıştırılamadı. Detay: {}", e),
+                        let args_val: Value = match serde_json::from_str(&args_str) {
+                            Ok(val) => val,
+                            Err(e) => {
+                                return format!("ERROR: The JSON arguments you sent could not be parsed. Syntax error: {}. Please fix the JSON format and try again.", e);
                             }
                         };
                         
-                        (call_id, tool_result)
+                        if name.is_empty() {
+                            "ERROR: LLM made a call with an empty/invalid tool name.".to_string()
+                        } else {
+                            let pool = pool_clone.read().await;
+                            match pool.execute_tool(&name, args_val).await {
+                                Ok(output) => output,
+                                Err(e) => format!("ERROR: Tool execution failed. Details: {}", e),
+                            }
+                        }
                     });
                     
-                    tasks.push(task);
+                    tasks.push((call_id, task));
                 }
 
-                let results = futures::future::join_all(tasks).await;
                 let mut has_error_in_this_step = false;
 
-                let mut history = self.history.lock().await;
-                for res in results {
-                    if let Ok((call_id, tool_result)) = res {
-                        if tool_result.starts_with("HATA:") {
-                            has_error_in_this_step = true;
+                for (call_id, handle) in tasks {
+                    let tool_result = match handle.await {
+                        Ok(res) => res,
+                        Err(join_err) => {
+                            if join_err.is_panic() {
+                                "ERROR: System panicked during tool execution (Thread Panic).".to_string()
+                            } else {
+                                "ERROR: Thread was cancelled during tool execution (Task Cancelled).".to_string()
+                            }
                         }
+                    };
 
-                        history.add_message(Message {
-                            role: Role::Tool,
-                            content: Some(tool_result),
-                            tool_calls: None,
-                            tool_call_id: Some(call_id),
-                        });
+                    if tool_result.starts_with("ERROR:") {
+                        has_error_in_this_step = true;
                     }
+
+                    self.memory.add_message(session_id, Message {
+                        role: Role::Tool,
+                        content: Some(tool_result),
+                        tool_calls: None,
+                        tool_call_id: Some(call_id),
+                    }).await?;
                 }
 
                 if has_error_in_this_step {
                     consecutive_errors += 1;
                     if consecutive_errors >= 3 {
                         return Err(AgentError::InternalError(
-                            "Kritik Hata: LLM üst üste 3 kez geçersiz araç çağırdı. Ölümcül döngü (Death Loop) engellendi.".to_string()
+                            "Critical Error: LLM called an invalid tool 3 times in a row. Death loop prevented.".to_string()
                         ));
                     }
                 } else {
@@ -151,7 +199,7 @@ impl Agent {
         }
 
         Err(AgentError::InternalError(
-            format!("Ajan adım sınırına ulaştı (max_steps={}).", max_steps)
+            format!("Agent reached the step limit (max_steps={}).", max_steps)
         ))
     }
 }

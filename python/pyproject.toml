@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "rust-agent-engine"
-version = "0.1.5"
+version = "0.2.0"
 description = "High-performance autonomous agent engine powered by Rust and Python."
 authors = [
     {name = "Emre Rodoplu", email = "emrerodoplu3@gmail.com"}
@@ -14,4 +14,10 @@ requires-python = ">=3.8"
 dependencies = []
 
 [tool.maturin]
-module-name = "rust_agent_engine"
+module-name = "rust_agent_engine._rust_agent_engine"
+
+[project.scripts]
+rust-agent = "rust_agent_engine.cli:main"
+
+[project.urls]
+"Homepage" = "https://github.com/EmreRodoplu/rust_agent_engine"
