@@ -1,12 +1,13 @@
-use std::format;
-
 use async_trait::async_trait;
 use redis::AsyncCommands;
+use redis::aio::MultiplexedConnection;
+use tokio::sync::OnceCell;
 
 use super::{AgentMemory, Message};
 
 pub struct RedisHistory {
     client: redis::Client,
+    conn: OnceCell<MultiplexedConnection>, 
     prefix: String,
     ttl_seconds: Option<usize>, 
 }
@@ -18,9 +19,18 @@ impl RedisHistory {
 
         Ok(Self {
             client,
+            conn: OnceCell::new(),
             prefix: "agent_session:".to_string(),
             ttl_seconds,
         })
+    }
+
+    async fn get_conn(&self) -> anyhow::Result<MultiplexedConnection> {
+        let conn = self.conn.get_or_try_init(|| async {
+            self.client.get_multiplexed_async_connection().await
+        }).await.map_err(|e| anyhow::anyhow!("Failed to establish multiplexed connection: {}", e))?;
+        
+        Ok(conn.clone())
     }
 
     fn get_key(&self, session_id: &str) -> String {
@@ -34,8 +44,7 @@ impl AgentMemory for RedisHistory {
         let key = self.get_key(session_id);
         let json_msg = serde_json::to_string(&msg)?;
 
-        let mut con = self.client.get_multiplexed_async_connection().await
-            .map_err(|e| anyhow::anyhow!("Failed to get Redis connection: {}", e))?;
+        let mut con = self.get_conn().await?;
 
         let _: () = redis::cmd("RPUSH").arg(&key).arg(json_msg).query_async(&mut con).await
             .map_err(|e| anyhow::anyhow!("Failed to write to Redis: {}", e))?;
@@ -50,9 +59,7 @@ impl AgentMemory for RedisHistory {
 
     async fn get_history(&self, session_id: &str) -> anyhow::Result<Vec<Message>> {
         let key = self.get_key(session_id);
-        
-        let mut con = self.client.get_multiplexed_async_connection().await
-            .map_err(|e| anyhow::anyhow!("Failed to get Redis connection: {}", e))?;
+        let mut con = self.get_conn().await?;
 
         let items: Vec<String> = con.lrange(&key, 0, -1).await
             .map_err(|e| anyhow::anyhow!("Failed to read from Redis: {}", e))?;
@@ -68,31 +75,28 @@ impl AgentMemory for RedisHistory {
 
     async fn set_history(&self, session_id: &str, messages: Vec<Message>) -> anyhow::Result<()> {
         let key = self.get_key(session_id);
-        let mut con = self.client.get_multiplexed_async_connection().await
-            .map_err(|e| anyhow::anyhow!("Failed to get Redis connection: {}", e))?;
+        let mut con = self.get_conn().await?;
+        let mut pipe = redis::pipe();
+        pipe.atomic().cmd("DEL").arg(&key);
 
-        
-        let _: () = redis::cmd("DEL").arg(&key).query_async(&mut con).await
-            .map_err(|e| anyhow::anyhow!("Failed to clear old Redis key: {}", e))?;
-
-        for msg in messages {
-            let json_msg = serde_json::to_string(&msg)?;
-            let _: () = redis::cmd("RPUSH").arg(&key).arg(json_msg).query_async(&mut con).await
-                .map_err(|e| anyhow::anyhow!("Failed to set new history in Redis: {}", e))?;
+        if !messages.is_empty() {
+            let json_msgs: Result<Vec<String>, _> = messages.iter().map(|m| serde_json::to_string(m)).collect();
+            pipe.cmd("RPUSH").arg(&key).arg(json_msgs?);
         }
 
         if let Some(ttl) = self.ttl_seconds {
-            let _: () = redis::cmd("EXPIRE").arg(&key).arg(ttl as i64).query_async(&mut con).await
-                .map_err(|e| anyhow::anyhow!("Failed to set TTL: {}", e))?;
+            pipe.cmd("EXPIRE").arg(&key).arg(ttl as i64);
         }
+
+        let _: () = pipe.query_async(&mut con).await
+            .map_err(|e| anyhow::anyhow!("Failed to set new history in Redis via Pipeline: {}", e))?;
 
         Ok(())
     }
 
     async fn clear(&self, session_id: &str) -> anyhow::Result<()> {
         let key = self.get_key(session_id);
-        let mut con = self.client.get_multiplexed_async_connection().await
-            .map_err(|e| anyhow::anyhow!("Failed to get Redis connection: {}", e))?;
+        let mut con = self.get_conn().await?;
 
         let _: () = redis::cmd("DEL").arg(&key).query_async(&mut con).await
             .map_err(|e| anyhow::anyhow!("Failed to delete Redis key: {}", e))?;
@@ -101,8 +105,7 @@ impl AgentMemory for RedisHistory {
     }
 
     async fn get_active_sessions(&self) -> anyhow::Result<Vec<String>> {
-        let mut con = self.client.get_multiplexed_async_connection().await
-            .map_err(|e| anyhow::anyhow!("Failed to get Redis connection: {}", e))?;
+        let mut con = self.get_conn().await?;
 
         let mut iter: redis::AsyncIter<String> = redis::cmd("SCAN")
             .arg("MATCH")

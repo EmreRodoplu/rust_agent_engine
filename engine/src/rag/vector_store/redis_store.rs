@@ -1,19 +1,33 @@
 use async_trait::async_trait;
+use redis::aio::MultiplexedConnection;
+use tokio::sync::OnceCell;
 
 use crate::rag::{Chunk, VectorStore, SearchResult};
 
 pub struct RedisVectorStore {
     client: redis::Client,
+    conn: OnceCell<MultiplexedConnection>,
 }
 
 impl RedisVectorStore {
     pub fn new(redis_url: &str) -> anyhow::Result<Self> {
         let client = redis::Client::open(redis_url)?;
-        Ok(Self { client })
+        Ok(Self { 
+            client,
+            conn: OnceCell::new()
+        })
+    }
+
+    async fn get_conn(&self) -> anyhow::Result<MultiplexedConnection> {
+        let conn = self.conn.get_or_try_init(|| async {
+            self.client.get_multiplexed_async_connection().await
+        }).await.map_err(|e| anyhow::anyhow!("Failed to establish multiplexed connection: {}", e))?;
+        
+        Ok(conn.clone())
     }
 
     async fn ensure_index(&self, collection: &str, dim: usize) -> anyhow::Result<()> {
-        let mut conn = self.client.get_multiplexed_async_connection().await?;
+        let mut conn = self.get_conn().await?;
         let index_name = format!("idx:{}", collection);
         let prefix = format!("rag:{}:", collection); 
 
@@ -62,7 +76,7 @@ impl VectorStore for RedisVectorStore {
         let dim = chunks[0].embedding.as_ref().map(|v| v.len()).unwrap_or(1536);
         self.ensure_index(collection, dim).await?;
 
-        let mut conn = self.client.get_multiplexed_async_connection().await?;
+        let mut conn = self.get_conn().await?;
 
         for chunk in chunks {
             let chunk_json = serde_json::to_string(&chunk)?;
@@ -90,7 +104,7 @@ impl VectorStore for RedisVectorStore {
     }
 
     async fn search(&self, collection: &str, query_vector: Vec<f32>, limit: usize) -> anyhow::Result<Vec<SearchResult>> {
-        let mut conn = self.client.get_multiplexed_async_connection().await?;
+        let mut conn = self.get_conn().await?;
         let index_name = format!("idx:{}", collection);
         let query_bytes = f32_vec_to_bytes(&query_vector);
 
@@ -158,7 +172,7 @@ impl VectorStore for RedisVectorStore {
     }
 
     async fn clear_collection(&self, collection: &str) -> anyhow::Result<()> {
-        let mut conn = self.client.get_multiplexed_async_connection().await?;
+        let mut conn = self.get_conn().await?;
         let index_name = format!("idx:{}", collection);
         
         let result: redis::RedisResult<()> = redis::cmd("FT.DROPINDEX")
@@ -176,7 +190,7 @@ impl VectorStore for RedisVectorStore {
     }
 
     async fn get_chunk_count(&self, collection: &str) -> anyhow::Result<usize> {
-        let mut conn = self.client.get_multiplexed_async_connection().await?;
+        let mut conn = self.get_conn().await?;
         let index_name = format!("idx:{}", collection);
 
         let info: redis::RedisResult<redis::Value> = redis::cmd("FT.INFO")

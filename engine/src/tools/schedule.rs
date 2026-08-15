@@ -1,19 +1,19 @@
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use redis::AsyncCommands;
+use redis::aio::MultiplexedConnection;
+use tokio::sync::{OnceCell, RwLock};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::RwLock;
 use tokio::time::sleep;
 use uuid::Uuid;
 use std::future::Future;
 use std::pin::Pin;
 
 pub type TaskFuture = Pin<Box<dyn Future<Output = Result<(), String>> + Send>>;
-
 const PROCESSING_TIMEOUT_SECS: i64 = 300; 
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -118,6 +118,7 @@ enum TaskBackend {
     InMemory(Arc<RwLock<HashMap<String, ScheduledTask>>>),
     Redis {
         client: redis::Client,
+        conn: Arc<OnceCell<MultiplexedConnection>>,
         queue_key: String,
         processing_key: String, 
     },
@@ -136,6 +137,7 @@ impl TaskManager {
                 return Self {
                     backend: TaskBackend::Redis {
                         client,
+                        conn: Arc::new(OnceCell::new()),
                         queue_key: "agent:task_queue".to_string(),
                         processing_key: "agent:task_processing".to_string(), 
                     },
@@ -148,6 +150,17 @@ impl TaskManager {
             backend: TaskBackend::InMemory(Arc::new(RwLock::new(HashMap::new()))),
         }
     }
+    async fn get_redis_conn(&self) -> Result<MultiplexedConnection, String> {
+        match &self.backend {
+            TaskBackend::Redis { client, conn, .. } => {
+                let c = conn.get_or_try_init(|| async {
+                    client.get_multiplexed_async_connection().await
+                }).await.map_err(|e| format!("Failed to connect to Redis: {}", e))?;
+                Ok(c.clone())
+            }
+            _ => Err("Not a Redis backend".to_string()),
+        }
+    }
 
     pub async fn add_task(&self, task: ScheduledTask) -> Result<(), String> {
         match &self.backend {
@@ -157,10 +170,8 @@ impl TaskManager {
                 println!("[TaskManager] [InMemory] Task queued: {} (Time: {})", task.id, task.execute_at);
                 Ok(())
             }
-            TaskBackend::Redis { client, queue_key, .. } => {
-                let mut con = client.get_multiplexed_async_connection().await
-                    .map_err(|e| format!("Redis connection error: {}", e))?;
-                
+            TaskBackend::Redis { queue_key, .. } => {
+                let mut con = self.get_redis_conn().await?;
                 let score = task.execute_at.timestamp();
                 let task_json = serde_json::to_string(&task)
                     .map_err(|e| format!("Serialization error: {}", e))?;
@@ -175,8 +186,8 @@ impl TaskManager {
     }
 
     pub async fn ack_task(&self, task_json: &str) {
-        if let TaskBackend::Redis { client, processing_key, .. } = &self.backend {
-            if let Ok(mut con) = client.get_multiplexed_async_connection().await {
+        if let TaskBackend::Redis { processing_key, .. } = &self.backend {
+            if let Ok(mut con) = self.get_redis_conn().await {
                 let _: redis::RedisResult<()> = con.zrem(processing_key, task_json).await;
             }
         }
@@ -197,8 +208,8 @@ impl TaskManager {
                     }
                 }
             }
-            TaskBackend::Redis { client, queue_key, processing_key } => {
-                if let Ok(mut con) = client.get_multiplexed_async_connection().await {
+            TaskBackend::Redis { queue_key, processing_key, .. } => {
+                if let Ok(mut con) = self.get_redis_conn().await {
                     let timeout_ts = now_ts - PROCESSING_TIMEOUT_SECS;
                     let zombi_tasks_result: redis::RedisResult<Vec<String>> = 
                         con.zrangebyscore(processing_key, 0, timeout_ts).await;
@@ -259,9 +270,9 @@ impl TaskManager {
                     t.status = new_status.clone();
                 }
             }
-            TaskBackend::Redis { client, .. } => {
+            TaskBackend::Redis { .. } => {
                 if let TaskStatus::Failed(ref err) = new_status {
-                    if let Ok(mut con) = client.get_multiplexed_async_connection().await {
+                    if let Ok(mut con) = self.get_redis_conn().await {
                         let mut failed_task = task.clone();
                         failed_task.status = TaskStatus::Failed(err.clone());
                         

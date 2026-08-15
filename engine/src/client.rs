@@ -4,6 +4,9 @@ use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::format;
 use std::time::Duration;
+use tokio::sync::Semaphore;
+use tokio::time::{sleep, Duration as TokioDuration};
+use std::sync::Arc;
 
 use crate::error::{AgentError, Result};
 use crate::memory::Role;
@@ -61,9 +64,11 @@ impl LLMConfig {
     }
 }
 
+#[derive(Clone)]
 pub struct LLMClient {
     http_client: Client,
     config: LLMConfig,
+    semaphore: Arc<Semaphore>, 
 }
 
 impl LLMClient {
@@ -74,6 +79,7 @@ impl LLMClient {
                 .build()
                 .unwrap_or_else(|_| Client::new()),
             config,
+            semaphore: Arc::new(Semaphore::new(50)), 
         }
     }
 
@@ -98,25 +104,53 @@ impl LLMClient {
             }
         }
 
-        let mut request_builder = self.http_client.post(&self.config.base_url);
+        let _permit = self.semaphore.acquire().await
+            .map_err(|_| AgentError::InternalError("Failed to acquire semaphore".to_string()))?;
+        let max_attempts = 3;
+        let mut backoff_ms = 1500;
+        let mut attempt = 0;
 
-        if let Some(key) = &self.config.api_key {
-            request_builder = request_builder.bearer_auth(key);
+        loop {
+            attempt += 1;
+            
+            let mut request_builder = self.http_client.post(&self.config.base_url);
+            if let Some(key) = &self.config.api_key {
+                request_builder = request_builder.bearer_auth(key);
+            }
+
+            match request_builder.json(&payload).send().await {
+                Ok(response) => {
+                    if response.status().is_success() {
+                        let response_json: Value = response.json().await
+                            .map_err(|e| AgentError::InternalError(e.to_string()))?;
+                        return Ok(response_json);
+                    }
+                    
+                    let status = response.status();
+                    if status.as_u16() == 429 || status.is_server_error() {
+                        if attempt >= max_attempts {
+                            let err_msg = response.text().await.unwrap_or_default();
+                            return Err(AgentError::InternalError(format!("API Error [{}]: {}", status, err_msg)));
+                        }
+                        println!("[Warning] API Rate Limit hit ({}). Retrying in {} ms...", status, backoff_ms);
+                        sleep(TokioDuration::from_millis(backoff_ms)).await;
+                        backoff_ms *= 2;
+                        continue;
+                    } 
+                    let err_msg = response.text().await.unwrap_or_default();
+                    return Err(AgentError::InternalError(format!("API Error [{}]: {}", status, err_msg)));
+                }
+                Err(e) => {
+                    if attempt >= max_attempts {
+                        return Err(AgentError::InternalError(format!("Network Error: {}", e)));
+                    }
+                    println!("[Warning] Network error: {}. Retrying in {} ms...", e, backoff_ms);
+                    sleep(TokioDuration::from_millis(backoff_ms)).await;
+                    backoff_ms *= 2;
+                    continue;
+                }
+            }
         }
-
-        let response = request_builder.json(&payload).send().await?;
-
-        if !response.status().is_success() {
-            let status_code = response.status();
-            let err_msg = response.text().await.unwrap_or_default();
-            return Err(AgentError::InternalError(format!(
-                "API Error [{}]: {}",
-                status_code, err_msg
-            )));
-        }
-
-        let response_json: Value = response.json().await?;
-        Ok(response_json)
     }
 
     async fn send_anthropic_request(
@@ -169,27 +203,59 @@ impl LLMClient {
             }
         }
 
-        let mut request_builder = self
-            .http_client
-            .post(&self.config.base_url)
-            .header("anthropic-version", "2023-06-01");
+        let _permit = self.semaphore.acquire().await
+            .map_err(|_| AgentError::InternalError("Failed to acquire semaphore".to_string()))?;
 
-        if let Some(key) = &self.config.api_key {
-            request_builder = request_builder.header("x-api-key", key);
+        let max_attempts = 3;
+        let mut backoff_ms = 1500;
+        let mut attempt = 0;
+
+        loop {
+            attempt += 1;
+            
+            let mut request_builder = self
+                .http_client
+                .post(&self.config.base_url)
+                .header("anthropic-version", "2023-06-01");
+
+            if let Some(key) = &self.config.api_key {
+                request_builder = request_builder.header("x-api-key", key);
+            }
+
+            match request_builder.json(&payload).send().await {
+                Ok(response) => {
+                    if response.status().is_success() {
+                        let response_json: Value = response.json().await
+                            .map_err(|e| AgentError::InternalError(e.to_string()))?;
+                        return Ok(response_json);
+                    }
+                    
+                    let status = response.status();
+                    if status.as_u16() == 429 || status.is_server_error() {
+                        if attempt >= max_attempts {
+                            let err_msg = response.text().await.unwrap_or_default();
+                            return Err(AgentError::InternalError(format!("Anthropic API error [{}]: {}", status, err_msg)));
+                        }
+                        println!("[Warning] Anthropic Rate Limit hit ({}). Retrying in {} ms...", status, backoff_ms);
+                        sleep(TokioDuration::from_millis(backoff_ms)).await;
+                        backoff_ms *= 2;
+                        continue;
+                    } 
+                    
+                    let err_msg = response.text().await.unwrap_or_default();
+                    return Err(AgentError::InternalError(format!("Anthropic API error [{}]: {}", status, err_msg)));
+                }
+                Err(e) => {
+                    if attempt >= max_attempts {
+                        return Err(AgentError::InternalError(format!("Network Error: {}", e)));
+                    }
+                    println!("[Warning] Network error: {}. Retrying in {} ms...", e, backoff_ms);
+                    sleep(TokioDuration::from_millis(backoff_ms)).await;
+                    backoff_ms *= 2;
+                    continue;
+                }
+            }
         }
-
-        let response = request_builder.json(&payload).send().await?;
-
-        if !response.status().is_success() {
-            let status_code = response.status();
-            let err_msg = response.text().await.unwrap_or_default();
-            return Err(AgentError::InternalError(format!(
-                "Anthropic API error [{}]: {}",
-                status_code, err_msg
-            )));
-        }
-
-        Ok(response.json().await?)
     }
 
     pub async fn send_stream_request(
@@ -216,26 +282,53 @@ impl LLMClient {
             }
         }
 
-        let mut request_builder = self.http_client.post(&self.config.base_url);
+        let _permit = self.semaphore.acquire().await
+            .map_err(|_| AgentError::InternalError("Failed to acquire semaphore".to_string()))?;
 
-        if let Some(key) = &self.config.api_key {
-            request_builder = request_builder.header("Authorization", format!("Bearer {}", key));
-        }
+        let max_attempts = 3;
+        let mut backoff_ms = 1500;
+        let mut attempt = 0;
+        
+        let response = loop {
+            attempt += 1;
+            
+            let mut request_builder = self.http_client.post(&self.config.base_url);
+            if let Some(key) = &self.config.api_key {
+                request_builder = request_builder.header("Authorization", format!("Bearer {}", key));
+            }
 
-        let response = request_builder
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| AgentError::InternalError(format!("Network error: {}", e)))?;
-
-        if !response.status().is_success() {
-            let status_code = response.status();
-            let err_msg = response.text().await.unwrap_or_default();
-            return Err(AgentError::InternalError(format!(
-                "API Error [{}]: {}",
-                status_code, err_msg
-            )));
-        }
+            match request_builder.json(&body).send().await {
+                Ok(resp) => {
+                    if resp.status().is_success() {
+                        break resp;
+                    }
+                    
+                    let status = resp.status();
+                    if status.as_u16() == 429 || status.is_server_error() {
+                        if attempt >= max_attempts {
+                            let err_msg = resp.text().await.unwrap_or_default();
+                            return Err(AgentError::InternalError(format!("API Error [{}]: {}", status, err_msg)));
+                        }
+                        println!("[Warning] Stream API Rate Limit hit ({}). Retrying in {} ms...", status, backoff_ms);
+                        sleep(TokioDuration::from_millis(backoff_ms)).await;
+                        backoff_ms *= 2;
+                        continue;
+                    } 
+                    
+                    let err_msg = resp.text().await.unwrap_or_default();
+                    return Err(AgentError::InternalError(format!("API Error [{}]: {}", status, err_msg)));
+                }
+                Err(e) => {
+                    if attempt >= max_attempts {
+                        return Err(AgentError::InternalError(format!("Network Error: {}", e)));
+                    }
+                    println!("[Warning] Stream Network error: {}. Retrying in {} ms...", e, backoff_ms);
+                    sleep(TokioDuration::from_millis(backoff_ms)).await;
+                    backoff_ms *= 2;
+                    continue;
+                }
+            }
+        };
 
         let mut stream = response.bytes_stream();
         let mut full_text = String::new();
