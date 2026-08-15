@@ -108,6 +108,7 @@ impl AgentMemory for RedisHistory {
         let mut con = self.get_conn().await?;
 
         let mut iter: redis::AsyncIter<String> = redis::cmd("SCAN")
+            .cursor_arg(0)
             .arg("MATCH")
             .arg(format!("{}*", self.prefix))
             .arg("COUNT")

@@ -193,27 +193,46 @@ impl VectorStore for RedisVectorStore {
         let mut conn = self.get_conn().await?;
         let index_name = format!("idx:{}", collection);
 
-        let info: redis::RedisResult<redis::Value> = redis::cmd("FT.INFO")
+        let info_result: redis::RedisResult<redis::Value> = redis::cmd("FT.INFO")
             .arg(&index_name)
             .query_async(&mut conn).await;
 
-        if let Ok(redis::Value::Bulk(arr)) = info {
-            let mut i = 0;
-            while i < arr.len() {
-                if let redis::Value::Data(ref key_bytes) = arr[i] {
-                    let key = String::from_utf8_lossy(key_bytes);
+        match info_result {
+            Ok(redis::Value::Bulk(arr)) => {
+                let mut i = 0;
+                while i < arr.len() {
+                    let key = match &arr[i] {
+                        redis::Value::Data(bytes) => String::from_utf8_lossy(bytes).into_owned(),
+                        redis::Value::Status(s) => s.clone(),
+                        _ => String::new(),
+                    };
+
                     if key == "num_docs" && i + 1 < arr.len() {
-                        if let redis::Value::Data(ref val_bytes) = arr[i+1] {
-                            let count_str = String::from_utf8_lossy(val_bytes);
-                            return Ok(count_str.parse().unwrap_or(0));
-                        } else if let redis::Value::Int(count) = arr[i+1] {
-                            return Ok(count as usize);
+                        match &arr[i + 1] {
+                            redis::Value::Int(n) => return Ok(*n as usize),
+                            redis::Value::Data(bytes) => {
+                                if let Ok(s) = String::from_utf8(bytes.clone()) {
+                                    return Ok(s.parse().unwrap_or(0));
+                                }
+                            }
+                            redis::Value::Status(s) => {
+                                return Ok(s.parse().unwrap_or(0));
+                            }
+                            _ => return Ok(0),
                         }
                     }
+                    i += 1;
                 }
-                i += 1;
+                Ok(0)
             }
+            Err(e) => {
+                if e.to_string().contains("Unknown Index name") {
+                    Ok(0)
+                } else {
+                    Err(anyhow::anyhow!("Redis FT.INFO error: {}", e))
+                }
+            }
+            _ => Ok(0),
         }
-        Ok(0)
     }
 }
