@@ -213,6 +213,7 @@ impl TaskManager {
                             }
                         }
                     }
+
                     let script = redis::Script::new(r#"
                         local task = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', ARGV[1], 'LIMIT', 0, 1)[1]
                         if task then
@@ -223,19 +224,23 @@ impl TaskManager {
                         return nil
                     "#);
 
-                    let script_result: redis::RedisResult<Option<String>> = script
-                        .key(queue_key)
-                        .key(processing_key)
-                        .arg(now_ts)
-                        .arg(now_ts) 
-                        .invoke_async(&mut con).await;
+                    loop {
+                        let script_result: redis::RedisResult<Option<String>> = script
+                            .key(queue_key)
+                            .key(processing_key)
+                            .arg(now_ts)
+                            .arg(now_ts) 
+                            .invoke_async(&mut con).await;
 
-                    if let Ok(Some(task_json)) = script_result {
-                        if let Ok(task) = serde_json::from_str::<ScheduledTask>(&task_json) {
-                            
-                            due_tasks.push((task, task_json));
-                        } else {
-                            self.ack_task(&task_json).await;
+                        match script_result {
+                            Ok(Some(task_json)) => {
+                                if let Ok(task) = serde_json::from_str::<ScheduledTask>(&task_json) {
+                                    due_tasks.push((task, task_json));
+                                } else {
+                                    self.ack_task(&task_json).await;
+                                }
+                            }
+                            _ => break, 
                         }
                     }
                 }
@@ -277,7 +282,7 @@ impl TaskManager {
 
     pub fn start_daemon<F>(self, executor: F)
     where
-    F: Fn(ScheduledTask) -> TaskFuture + Send + Sync + 'static
+    F: Fn(ScheduledTask) -> TaskFuture + Send + Sync + Clone + 'static
     {
         let manager = self.clone();
         tokio::spawn(async move {
@@ -289,14 +294,18 @@ impl TaskManager {
                 for (task, task_json) in due_tasks {
                     println!("[Daemon] Task triggered: {}", task.id);
                     
-                    let result = executor(task.clone()).await; 
+                    let manager_clone = manager.clone();
+                    let executor_result_future = executor(task.clone());
                     
-                    manager.ack_task(&task_json).await;
-                    
-                    match result {
-                        Ok(_) => manager.update_status(&task, TaskStatus::Completed).await,
-                        Err(e) => manager.update_status(&task, TaskStatus::Failed(e)).await,
-                    }
+                    tokio::spawn(async move {
+                        let result = executor_result_future.await; 
+                        manager_clone.ack_task(&task_json).await;
+
+                        match result {
+                            Ok(_) => manager_clone.update_status(&task, TaskStatus::Completed).await,
+                            Err(e) => manager_clone.update_status(&task, TaskStatus::Failed(e)).await,
+                        }
+                    });
                 }
             }
         });

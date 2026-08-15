@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+
 use crate::rag::{Chunk, VectorStore, SearchResult};
 
 pub struct RedisVectorStore {
@@ -21,7 +22,7 @@ impl RedisVectorStore {
             .query_async(&mut conn).await;
 
         if info_check.is_err() {
-            let _: () = redis::cmd("FT.CREATE")
+            let create_result: redis::RedisResult<()> = redis::cmd("FT.CREATE")
                 .arg(&index_name)
                 .arg("ON").arg("HASH")
                 .arg("PREFIX").arg("1").arg(&prefix)
@@ -32,8 +33,14 @@ impl RedisVectorStore {
                 .arg("TYPE").arg("FLOAT32")
                 .arg("DIM").arg(dim)
                 .arg("DISTANCE_METRIC").arg("COSINE")
-                .query_async(&mut conn).await?;
-            println!("[Vector Store] Created new HNSW index: {}", index_name);
+                .query_async(&mut conn).await;
+
+            if let Err(e) = create_result {
+                if !e.to_string().contains("Index already exists") {
+                    return Err(e.into());
+                }
+            }
+            println!("[Vector Store] Created (or verified) HNSW index: {}", index_name);
         }
         Ok(())
     }
@@ -154,10 +161,16 @@ impl VectorStore for RedisVectorStore {
         let mut conn = self.client.get_multiplexed_async_connection().await?;
         let index_name = format!("idx:{}", collection);
         
-        let _: redis::RedisResult<()> = redis::cmd("FT.DROPINDEX")
+        let result: redis::RedisResult<()> = redis::cmd("FT.DROPINDEX")
             .arg(&index_name)
             .arg("DD")
             .query_async(&mut conn).await;
+            
+        if let Err(e) = result {
+            if !e.to_string().contains("Unknown Index name") {
+                return Err(e.into());
+            }
+        }
             
         Ok(())
     }
