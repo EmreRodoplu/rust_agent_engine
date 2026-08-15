@@ -64,6 +64,14 @@ impl Embedder for UniversalEmbedder {
         let mut parsed: StandardEmbeddingResponse = res.json().await?;
         parsed.data.sort_by_key(|d| d.index);
 
+        if parsed.data.len() != chunks.len() {
+            return Err(anyhow::anyhow!(
+                "CRITICAL: Data Loss Prevention! The API returned {} embeddings, but we sent {} chunks.", 
+                parsed.data.len(), 
+                chunks.len()
+            ));
+        }
+
         for (chunk, data) in chunks.iter_mut().zip(parsed.data) {
             chunk.embedding = Some(data.embedding);
         }

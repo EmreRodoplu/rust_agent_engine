@@ -72,19 +72,16 @@ impl PyAgent {
         })
     }
 
-    #[pyo3(signature = (user_input, session_id=None, stream_callback=None, max_tokens=None, max_steps=None))]
+    #[pyo3(signature = (user_input, session_id, stream_callback=None, max_tokens=None, max_steps=None))]
     pub fn run(
         &self,
         py: Python,
         user_input: &str,
-        session_id: Option<&str>, 
+        session_id: &str, 
         stream_callback: Option<PyObject>,
         max_tokens: Option<usize>,
         max_steps: Option<usize>
     ) -> PyResult<String> {
-        
-        let actual_session_id = session_id.unwrap_or("default_session");
-        
         let cb = stream_callback.map(|py_cb: Py<PyAny>| {
             let py_cb = std::sync::Arc::new(py_cb);
 
@@ -98,21 +95,24 @@ impl PyAgent {
             }) as Box<dyn Fn(String) + Send + Sync>
         });
         
-        let session_id_str = actual_session_id.to_string();
-        let user_input_str = user_input.to_string();
+        let session_id_owned = session_id.to_string();
+        let user_input_owned = user_input.to_string();
+
+        
         let result: Result<String, AgentError> = py.allow_threads(|| {
             get_runtime().block_on(async { 
-                self.inner.run_with_stream(&session_id_str, &user_input_str, cb, max_steps.unwrap_or(15)).await
-            })
-        });
-        let prune_session_str = actual_session_id.to_string();
-        py.allow_threads(|| {
-            get_runtime().block_on(async {
+                let run_result = self.inner.run_with_stream(
+                    &session_id_owned, 
+                    &user_input_owned, 
+                    cb, 
+                    max_steps.unwrap_or(15)
+                ).await;
                 let limit = max_tokens.unwrap_or(4096);
-                if let Err(e) = self.inner.memory.prune_by_tokens(&prune_session_str, limit).await {
-                    eprintln!("[Memory Warning] Failed to prune session '{}': {}", prune_session_str, e);
+                if let Err(e) = self.inner.memory.prune_by_tokens(&session_id_owned, limit).await {
+                    eprintln!("[Memory Warning] Failed to prune session '{}': {}", session_id_owned, e);
                 }
-            });
+                run_result
+            })
         });
 
         result.map_err(|e| PyRuntimeError::new_err(e.to_string()))

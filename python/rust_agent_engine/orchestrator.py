@@ -1,5 +1,4 @@
 import json
-import threading
 from typing import Dict, Callable, Optional
 from ._rust_agent_engine import TaskManager, Agent
 
@@ -24,7 +23,7 @@ class AgentOrchestrator:
             execute_at: Optional[str] = None, 
             prompt: str = "", 
             tool_name: str = "", 
-            tool_args: dict = {}
+            tool_args: Optional[dict] = None  
         ) -> str:
             """
             Schedules tasks requested by the user to be executed in the future.
@@ -32,19 +31,22 @@ class AgentOrchestrator:
             
             Args:
                 action_type: Can only take the value 'autonomous_goal' or 'execute_tool'.
-                delay_in_seconds: PREFERRED for relative times. Delay in seconds from now. (e.g., 'in 2 hours' -> 7200, 'tomorrow' -> 86400)
-                execute_at: OPTIONAL. The exact date/time in UTC ISO 8601. Only use if a specific calendar date is provided.
-                prompt: If action_type is 'autonomous_goal', the detail of the task you need to do when the time comes.
-                tool_name: If action_type is 'execute_tool', the name of the function to be executed.
+                delay_in_seconds: PREFERRED for relative times. Delay in seconds from now.
+                execute_at: OPTIONAL. The exact date/time in UTC ISO 8601.
+                prompt: If action_type is 'autonomous_goal', the detail of the task.
+                tool_name: If action_type is 'execute_tool', the name of the function.
                 tool_args: JSON arguments for the tool.
             """
+            if tool_args is None:
+                tool_args = {}
+                
             try:
                 if action_type == "autonomous_goal":
                     self.task_manager.add_autonomous_task(prompt, execute_at, delay_in_seconds)
                     return "Autonomous task successfully scheduled in the background."
                 
                 elif action_type == "execute_tool":
-                    args_str = json.dumps(tool_args or {})
+                    args_str = json.dumps(tool_args)
                     self.task_manager.add_tool_task(tool_name, args_str, execute_at, delay_in_seconds)
                     return f"Tool execution ({tool_name}) successfully scheduled in the background."
                 
@@ -59,12 +61,13 @@ class AgentOrchestrator:
         
         def _router_callback(task_id: str, action_type: str, payload: str, args_str: str) -> None:
             if action_type == "autonomous_goal":
-                def _run_agent_thread():
-                    print(f"\n[Autonomous Wake] Task ID: {task_id}")
+                print(f"\n[Autonomous Wake] Task ID: {task_id}")
+                try:
                     response = self.agent.run(payload, session_id=f"auto_{task_id}")
                     print(f"[Autonomous Report]: {response}\n")
-                
-                threading.Thread(target=_run_agent_thread, daemon=True).start()
+                except Exception as e:
+                    print(f"[Autonomous Error]: {e}\n")
+                    raise e 
                 
             elif action_type == "execute_tool":
                 payload = payload.replace("functions.", "").replace("tools.", "")
@@ -77,8 +80,11 @@ class AgentOrchestrator:
                         func(**args)
                     except Exception as e:
                         print(f"[Tool Error] {payload} crashed during execution: {e}")
+                        raise e 
                 else:
-                    print(f"[Missing Tool] A tool named '{payload}' could not be found!")
+                    msg = f"[Missing Tool] A tool named '{payload}' could not be found!"
+                    print(msg)
+                    raise ValueError(msg) 
 
         self.task_manager.start_daemon(_router_callback)
         print("AgentOrchestrator: Background Rust engine activated!")

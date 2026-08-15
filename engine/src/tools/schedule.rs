@@ -9,6 +9,12 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio::time::sleep;
 use uuid::Uuid;
+use std::future::Future;
+use std::pin::Pin;
+
+pub type TaskFuture = Pin<Box<dyn Future<Output = Result<(), String>> + Send>>;
+
+const PROCESSING_TIMEOUT_SECS: i64 = 300; 
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub enum TaskStatus {
@@ -113,6 +119,7 @@ enum TaskBackend {
     Redis {
         client: redis::Client,
         queue_key: String,
+        processing_key: String, 
     },
 }
 
@@ -130,6 +137,7 @@ impl TaskManager {
                     backend: TaskBackend::Redis {
                         client,
                         queue_key: "agent:task_queue".to_string(),
+                        processing_key: "agent:task_processing".to_string(), 
                     },
                 };
             }
@@ -149,7 +157,7 @@ impl TaskManager {
                 println!("[TaskManager] [InMemory] Task queued: {} (Time: {})", task.id, task.execute_at);
                 Ok(())
             }
-            TaskBackend::Redis { client, queue_key } => {
+            TaskBackend::Redis { client, queue_key, .. } => {
                 let mut con = client.get_multiplexed_async_connection().await
                     .map_err(|e| format!("Redis connection error: {}", e))?;
                 
@@ -166,8 +174,17 @@ impl TaskManager {
         }
     }
 
-    pub async fn get_due_tasks(&self) -> Vec<ScheduledTask> {
+    pub async fn ack_task(&self, task_json: &str) {
+        if let TaskBackend::Redis { client, processing_key, .. } = &self.backend {
+            if let Ok(mut con) = client.get_multiplexed_async_connection().await {
+                let _: redis::RedisResult<()> = con.zrem(processing_key, task_json).await;
+            }
+        }
+    }
+
+    pub async fn get_due_tasks(&self) -> Vec<(ScheduledTask, String)> {
         let now = Utc::now();
+        let now_ts = now.timestamp();
         let mut due_tasks = Vec::new();
 
         match &self.backend {
@@ -176,31 +193,56 @@ impl TaskManager {
                 for (_, task) in lock.iter_mut() {
                     if task.status == TaskStatus::Pending && task.execute_at <= now {
                         task.status = TaskStatus::InProgress; 
-                        due_tasks.push(task.clone());
+                        due_tasks.push((task.clone(), String::new()));
                     }
                 }
             }
-            TaskBackend::Redis { client, queue_key } => {
+            TaskBackend::Redis { client, queue_key, processing_key } => {
                 if let Ok(mut con) = client.get_multiplexed_async_connection().await {
-                    let now_ts = now.timestamp();
-                    let tasks_json_result: redis::RedisResult<Vec<String>> = 
-                        con.zrangebyscore(queue_key, 0, now_ts).await;
-
-                    if let Ok(tasks_json) = tasks_json_result {
-                        for tj in tasks_json {
-                            let removed: i32 = con.zrem(queue_key, &tj).await.unwrap_or(0);
-                            if removed > 0 {
-                                if let Ok(task) = serde_json::from_str::<ScheduledTask>(&tj) {
-                                    due_tasks.push(task);
+                    let timeout_ts = now_ts - PROCESSING_TIMEOUT_SECS;
+                    let zombi_tasks_result: redis::RedisResult<Vec<String>> = 
+                        con.zrangebyscore(processing_key, 0, timeout_ts).await;
+                        
+                    if let Ok(zombi_tasks) = zombi_tasks_result {
+                        for zt in zombi_tasks {
+                            if let Ok(removed) = con.zrem::<&str, &String, i32>(processing_key, &zt).await {
+                                if removed > 0 {
+                                    println!("[TaskManager] 🧟 Zombie task detected! Re-queueing for retry.");
+                                    let _: redis::RedisResult<()> = con.zadd(queue_key, &zt, now_ts).await;
                                 }
                             }
+                        }
+                    }
+                    let script = redis::Script::new(r#"
+                        local task = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', ARGV[1], 'LIMIT', 0, 1)[1]
+                        if task then
+                            redis.call('ZREM', KEYS[1], task)
+                            redis.call('ZADD', KEYS[2], ARGV[2], task)
+                            return task
+                        end
+                        return nil
+                    "#);
+
+                    let script_result: redis::RedisResult<Option<String>> = script
+                        .key(queue_key)
+                        .key(processing_key)
+                        .arg(now_ts)
+                        .arg(now_ts) 
+                        .invoke_async(&mut con).await;
+
+                    if let Ok(Some(task_json)) = script_result {
+                        if let Ok(task) = serde_json::from_str::<ScheduledTask>(&task_json) {
+                            
+                            due_tasks.push((task, task_json));
+                        } else {
+                            self.ack_task(&task_json).await;
                         }
                     }
                 }
             }
         }
         
-        due_tasks.sort_by_key(|t| t.execute_at);
+        due_tasks.sort_by_key(|(t, _)| t.execute_at);
         due_tasks
     }
 
@@ -233,29 +275,27 @@ impl TaskManager {
         }
     }
 
-    pub fn start_daemon<F>(self, executor: F) 
-    where 
-        F: Fn(ScheduledTask) -> Result<(), String> + Send + Sync + 'static 
+    pub fn start_daemon<F>(self, executor: F)
+    where
+    F: Fn(ScheduledTask) -> TaskFuture + Send + Sync + 'static
     {
-        let manager = self.clone(); 
-
+        let manager = self.clone();
         tokio::spawn(async move {
             println!("[Daemon] Background task manager started.");
             loop {
                 sleep(Duration::from_secs(1)).await;
                 let due_tasks = manager.get_due_tasks().await;
-
-                for task in due_tasks {
+                
+                for (task, task_json) in due_tasks {
                     println!("[Daemon] Task triggered: {}", task.id);
-                    let result = executor(task.clone());
-
+                    
+                    let result = executor(task.clone()).await; 
+                    
+                    manager.ack_task(&task_json).await;
+                    
                     match result {
-                        Ok(_) => {
-                            manager.update_status(&task, TaskStatus::Completed).await;
-                        },
-                        Err(e) => {
-                            manager.update_status(&task, TaskStatus::Failed(e)).await;
-                        }
+                        Ok(_) => manager.update_status(&task, TaskStatus::Completed).await,
+                        Err(e) => manager.update_status(&task, TaskStatus::Failed(e)).await,
                     }
                 }
             }

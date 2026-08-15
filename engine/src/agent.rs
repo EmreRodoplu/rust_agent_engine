@@ -87,9 +87,19 @@ impl Agent {
             {
                 Ok(msg) => msg,
                 Err(e) => {
-                    let err_str = e.to_string();
+                    let err_str = e.to_string().to_lowercase();
                     
-                    if err_str.contains("tool_use_failed") || err_str.contains("validation failed") || err_str.contains("invalid_request_error") || err_str.contains("invalid") || err_str.contains("Invalid") {
+                    let is_tool_format_err = err_str.contains("tool_use_failed") 
+                        || (err_str.contains("invalid") && err_str.contains("argument"))
+                        || err_str.contains("validation failed")
+                        || err_str.contains("invalid_request_error");
+                        
+                    let is_critical_api_err = err_str.contains("api_key") 
+                        || err_str.contains("unauthorized")
+                        || err_str.contains("insufficient_quota")
+                        || err_str.contains("rate_limit");
+
+                    if is_tool_format_err && !is_critical_api_err {
                         
                         println!("[API GUARDRAIL] LLM Provider rejected the malformed tool call! Self-Healing activated.");
                         

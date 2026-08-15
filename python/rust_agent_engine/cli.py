@@ -276,14 +276,14 @@ def serve_api(
 
     class ChatRequest(BaseModel):
         query: str
-        session_id: str = "default_session"
+        session_id: str
 
     class ChatResponse(BaseModel):
         response: str
         agent_name: str
 
     @api_app.post("/api/chat", response_model=ChatResponse)
-    async def chat_endpoint(request: ChatRequest):
+    def chat_endpoint(request: ChatRequest):
         try:
             su_an_utc = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             zengin_prompt = f"[SYSTEM_NOTE: Current UTC Time is {su_an_utc}]\n\n{request.query}"
@@ -406,7 +406,7 @@ def rag_status(
         
         status = rag_motoru.get_collection_status(collection)
         print(f"[bold green]✓ RAG engine is active.[/bold green]")
-        print(f"status: {status}")
+        print(f"👉 [bold cyan]{status}[/bold cyan]")
     except Exception as e:
         print(f"[bold red]Error:[/bold red] Could not retrieve RAG status. {e}")
         raise typer.Exit(code=1)

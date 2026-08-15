@@ -104,8 +104,20 @@ impl AgentMemory for RedisHistory {
         let mut con = self.client.get_multiplexed_async_connection().await
             .map_err(|e| anyhow::anyhow!("Failed to get Redis connection: {}", e))?;
 
-        let keys: Vec<String> = redis::cmd("KEYS").arg(format!("{}*", self.prefix)).query_async(&mut con).await
-            .map_err(|e| anyhow::anyhow!("Failed to retrieve active sessions from Redis: {}", e))?;
+        let mut iter: redis::AsyncIter<String> = redis::cmd("SCAN")
+            .arg("MATCH")
+            .arg(format!("{}*", self.prefix))
+            .arg("COUNT")
+            .arg(1000) 
+            .clone()
+            .iter_async(&mut con)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to retrieve active sessions from Redis using SCAN: {}", e))?;
+
+        let mut keys = Vec::new();
+        while let Some(key) = iter.next_item().await {
+            keys.push(key);
+        }
 
         let session_ids: Vec<String> = keys.into_iter()
             .map(|key| key.trim_start_matches(&self.prefix).to_string())

@@ -54,7 +54,7 @@ class Agent:
     def run(
         self,
         user_input: str,
-        session_id: Optional[str] = None,
+        session_id: str,
         stream_callback: Optional[Callable[[str], None]] = None,
         max_tokens: Optional[int] = None,
         max_steps: Optional[int] = None
